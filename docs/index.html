@@ -458,8 +458,15 @@
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
     /* ── RESPONSIVE ─────────────────────────── */
+    /* ── TABLE SCROLL ───────────────────────── */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
     @media (max-width: 1100px) {
       .middle-row { grid-template-columns: 1fr; }
+    }
+
+    @media (min-width: 769px) {
+      .sys-chips-mobile { display: none; }
     }
 
     @media (max-width: 768px) {
@@ -467,6 +474,8 @@
       .stats-grid { grid-template-columns: repeat(2, 1fr); }
       header { padding: 0 16px; }
       .last-updated { display: none; }
+      .sys-chips-desktop { display: none; }
+      .col-raison { display: none; }
     }
   </style>
 </head>
@@ -475,9 +484,11 @@
 <header>
   <div class="logo"><span>//</span> TRADING BOT</div>
   <div class="header-right">
-    <div class="sys-chip" id="sysAlpaca"><span class="sys-dot"></span>Alpaca</div>
-    <div class="sys-chip" id="sysSupabase"><span class="sys-dot"></span>Supabase</div>
-    <div class="sys-chip" id="sysBotCycle"><span class="sys-dot"></span>Dernier cycle bot</div>
+    <div class="sys-chips-desktop" style="display:flex;align-items:center;gap:8px">
+      <div class="sys-chip" id="sysAlpaca"><span class="sys-dot"></span>Alpaca</div>
+      <div class="sys-chip" id="sysSupabase"><span class="sys-dot"></span>Supabase</div>
+      <div class="sys-chip" id="sysBotCycle"><span class="sys-dot"></span>Dernier cycle bot</div>
+    </div>
     <a href="logs.html" style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--muted); text-decoration:none; letter-spacing:.05em; transition:color .2s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">Logs →</a>
     <div class="status-chip closed" id="statusChip">
       <span class="status-dot"></span>
@@ -488,8 +499,15 @@
 
 <main>
 
+  <!-- SYSTEM STATUS MOBILE -->
+  <div class="sys-chips-mobile system-status" style="margin-top:16px">
+    <div class="sys-chip" id="sysAlpacaM"><span class="sys-dot"></span>Alpaca</div>
+    <div class="sys-chip" id="sysSupabaseM"><span class="sys-dot"></span>Supabase</div>
+    <div class="sys-chip" id="sysBotCycleM"><span class="sys-dot"></span>Dernier cycle bot</div>
+  </div>
+
   <!-- STATS -->
-  <div class="section-label" style="margin-top:32px">Vue d'ensemble</div>
+  <div class="section-label" style="margin-top:16px">Vue d'ensemble</div>
   <div class="stats-grid">
     <div class="stat-card">
       <div class="stat-label">Valeur portfolio</div>
@@ -540,6 +558,7 @@
     <div class="table-header">
       <div class="card-title" style="margin:0">Historique des décisions</div>
     </div>
+    <div class="table-scroll">
     <table>
       <thead>
         <tr>
@@ -548,7 +567,7 @@
           <th>Symbole</th>
           <th style="text-align:right">Qté</th>
           <th style="text-align:right">PnL</th>
-          <th>Raison</th>
+          <th class="col-raison">Raison</th>
         </tr>
       </thead>
       <tbody id="tradesBody">
@@ -559,6 +578,7 @@
         </td></tr>
       </tbody>
     </table>
+    </div>
   </div>
 
 </main>
@@ -697,7 +717,7 @@ function renderTrades(trades) {
       <td>${sym}</td>
       <td class="td-num">${t.quantity ?? '—'}</td>
       <td class="td-pnl ${pnlClass}">${pnlStr}</td>
-      <td class="td-reason ${short ? 'expandable' : ''}" onclick="this.classList.toggle('expanded')">${fullReason}</td>
+      <td class="td-reason col-raison ${short ? 'expandable' : ''}" onclick="this.classList.toggle('expanded')">${fullReason}</td>
     </tr>`;
   }).join('');
 }
@@ -750,9 +770,12 @@ function updateStatus(latestSnapshot, marketOpen) {
 
 // ── System status chips ───────────────────────────────────────────────────────
 function setChip(id, state, label) {
-  const el = document.getElementById(id);
-  el.className = `sys-chip ${state}`;
-  el.innerHTML = `<span class="sys-dot"></span>${label}`;
+  [id, id + 'M'].forEach(eid => {
+    const el = document.getElementById(eid);
+    if (!el) return;
+    el.className = `sys-chip ${state}`;
+    el.innerHTML = `<span class="sys-dot"></span>${label}`;
+  });
 }
 
 function updateSystemStatus({ alpacaOk, supabaseOk, lastSnapshot, marketOpen }) {

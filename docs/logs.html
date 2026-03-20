@@ -305,10 +305,13 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
     @media (max-width: 768px) {
       main { padding: 16px; }
       header { padding: 0 16px; }
       .last-refresh { display: none; }
+      .col-rawlog { display: none; }
     }
   </style>
 </head>
@@ -337,18 +340,20 @@
       <div class="table-title">Historique des exécutions</div>
       <div class="table-count" id="runsCount"></div>
     </div>
+    <div class="table-scroll">
     <table>
       <thead>
         <tr>
           <th>Heure</th>
           <th>Ce qui s'est passé</th>
-          <th>Log brut</th>
+          <th class="col-rawlog">Log brut</th>
         </tr>
       </thead>
       <tbody id="runsBody">
         <tr><td colspan="3" style="padding:16px"><div class="skeleton"></div></td></tr>
       </tbody>
     </table>
+    </div>
     <div id="pagination" style="display:none; align-items:center; justify-content:space-between; padding:12px 22px; border-top:1px solid var(--border);">
       <span id="pageInfo" style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--label);"></span>
       <div style="display:flex; gap:8px;">
@@ -448,7 +453,7 @@ function renderPage() {
     return `<tr>
       <td class="td-time">${fmtDate(r.started_at)}</td>
       <td><span class="result-badge ${cls}"><span class="dot"></span>${label}</span></td>
-      <td class="td-detail ${isLong ? 'expandable' : ''}" onclick="this.classList.toggle('expanded')">${rawLog}</td>
+      <td class="td-detail col-rawlog ${isLong ? 'expandable' : ''}" onclick="this.classList.toggle('expanded')">${rawLog}</td>
     </tr>`;
   }).join('');
 
