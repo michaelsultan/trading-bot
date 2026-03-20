@@ -465,6 +465,8 @@
       .middle-row { grid-template-columns: 1fr; }
     }
 
+    .sys-chips-desktop { display: flex; align-items: center; gap: 8px; }
+
     @media (min-width: 769px) {
       .sys-chips-mobile { display: none; }
     }
@@ -484,7 +486,7 @@
 <header>
   <div class="logo"><span>//</span> TRADING BOT</div>
   <div class="header-right">
-    <div class="sys-chips-desktop" style="display:flex;align-items:center;gap:8px">
+    <div class="sys-chips-desktop">
       <div class="sys-chip" id="sysAlpaca"><span class="sys-dot"></span>Alpaca</div>
       <div class="sys-chip" id="sysSupabase"><span class="sys-dot"></span>Supabase</div>
       <div class="sys-chip" id="sysBotCycle"><span class="sys-dot"></span>Dernier cycle bot</div>
