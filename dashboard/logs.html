@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trading Bot — Logs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #080808;
+      --surface:   #101010;
+      --border:    #1e1e1e;
+      --green:     #00ff88;
+      --green-dim: rgba(0,255,136,.08);
+      --red:       #ff3d5a;
+      --red-dim:   rgba(255,61,90,.08);
+      --orange:    #f5a623;
+      --orange-dim:rgba(245,166,35,.08);
+      --muted:     #444;
+      --label:     #666;
+      --text:      #d0d0d0;
+      --white:     #f0f0f0;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 14px; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      min-height: 100vh;
+      padding: 0 0 60px;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px, transparent 2px,
+        rgba(0,0,0,.04) 2px, rgba(0,0,0,.04) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── HEADER ── */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(8,8,8,.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      height: 56px;
+    }
+
+    .header-left { display: flex; align-items: center; gap: 24px; }
+
+    .logo {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+      color: var(--white);
+    }
+    .logo span { color: var(--green); }
+
+    .back-link {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      text-decoration: none;
+      letter-spacing: .05em;
+      transition: color .2s;
+    }
+    .back-link:hover { color: var(--text); }
+
+    .header-right { display: flex; align-items: center; gap: 12px; }
+
+    .last-refresh {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--label);
+    }
+
+    .refresh-btn {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: none;
+      border: 1px solid var(--border);
+      padding: 5px 12px;
+      border-radius: 3px;
+      cursor: pointer;
+      transition: all .2s;
+    }
+    .refresh-btn:hover { color: var(--green); border-color: rgba(0,255,136,.3); }
+    .refresh-btn.spinning { animation: spin .6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── MAIN ── */
+    main { max-width: 1400px; margin: 0 auto; padding: 32px 32px 0; }
+
+    .section-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+      color: var(--label);
+      margin-bottom: 12px;
+    }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    /* ── TABLES ── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 24px;
+    }
+
+    .table-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .table-title {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: .2em;
+      text-transform: uppercase;
+      color: var(--label);
+    }
+
+    .table-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    table { width: 100%; border-collapse: collapse; }
+
+    thead th {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: .15em;
+      text-transform: uppercase;
+      color: var(--label);
+      padding: 9px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      font-weight: 400;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid rgba(30,30,30,.6);
+      transition: background .15s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,.02); }
+
+    tbody td {
+      padding: 10px 16px;
+      font-size: 12px;
+      vertical-align: middle;
+    }
+
+    .td-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* Résultat badge */
+    .result-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+    .result-badge .dot {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .result-buy    { color: var(--green);  background: var(--green-dim);  border: 1px solid rgba(0,255,136,.2); }
+    .result-sell   { color: var(--red);    background: var(--red-dim);    border: 1px solid rgba(255,61,90,.2); }
+    .result-hold   { color: var(--muted);  background: rgba(255,255,255,.02); border: 1px solid var(--border); }
+    .result-closed { color: #555;          background: transparent;       border: 1px solid #1a1a1a; }
+    .result-error  { color: var(--red);    background: var(--red-dim);    border: 1px solid rgba(255,61,90,.2); }
+    .result-warn   { color: var(--orange); background: var(--orange-dim); border: 1px solid rgba(245,166,35,.2); }
+
+    /* Action chips */
+    .chip {
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: .1em;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 3px;
+    }
+    .chip-buy  { color: var(--green);  background: var(--green-dim);  border: 1px solid rgba(0,255,136,.2); }
+    .chip-sell { color: var(--red);    background: var(--red-dim);    border: 1px solid rgba(255,61,90,.2); }
+    .chip-hold { color: var(--muted);  background: rgba(255,255,255,.03); border: 1px solid var(--border); }
+
+    .badge-symbol {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--white);
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.08);
+      padding: 2px 8px;
+      border-radius: 3px;
+    }
+
+    .td-detail {
+      font-size: 11px;
+      color: var(--muted);
+      max-width: 420px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .td-detail.expandable {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .td-detail.expandable:hover { color: var(--text); }
+    .td-detail.expandable.expanded { white-space: normal; overflow: visible; }
+
+    .td-reason {
+      font-size: 12px;
+      color: var(--muted);
+      max-width: 500px;
+    }
+    .td-reason.expandable {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: pointer;
+    }
+    .td-reason.expandable:hover { color: var(--text); }
+    .td-reason.expandable.expanded { white-space: normal; overflow: visible; }
+
+    /* Skeleton */
+    .skeleton {
+      background: linear-gradient(90deg, var(--border) 25%, #1a1a1a 50%, var(--border) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 3px;
+      height: 36px;
+    }
+    @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+
+    /* Countdown */
+    .countdown {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .countdown-bar {
+      width: 60px;
+      height: 2px;
+      background: var(--border);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+    .countdown-fill {
+      height: 100%;
+      background: var(--green);
+      border-radius: 1px;
+      transition: width 1s linear;
+      opacity: .5;
+    }
+
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    @media (max-width: 768px) {
+      main { padding: 16px; }
+      header { padding: 0 16px; }
+      .last-refresh { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <div class="logo"><span>//</span> LOGS</div>
+    <a href="index.html" class="back-link">← Dashboard</a>
+  </div>
+  <div class="header-right">
+    <div class="countdown" id="countdown">
+      <span id="countdownText">30s</span>
+      <div class="countdown-bar"><div class="countdown-fill" id="countdownFill" style="width:100%"></div></div>
+    </div>
+    <div class="last-refresh" id="lastRefresh">—</div>
+    <button class="refresh-btn" id="refreshBtn" onclick="triggerRefresh()">↻ Refresh</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- RUN HISTORY -->
+  <div class="table-wrap">
+    <div class="table-header">
+      <div class="table-title">Historique des exécutions</div>
+      <div class="table-count" id="runsCount"></div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Heure</th>
+          <th>Ce qui s'est passé</th>
+          <th>Log brut</th>
+        </tr>
+      </thead>
+      <tbody id="runsBody">
+        <tr><td colspan="3" style="padding:16px"><div class="skeleton"></div></td></tr>
+      </tbody>
+    </table>
+    <div id="pagination" style="display:none; align-items:center; justify-content:space-between; padding:12px 22px; border-top:1px solid var(--border);">
+      <span id="pageInfo" style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--label);"></span>
+      <div style="display:flex; gap:8px;">
+        <button onclick="changePage(-1)" id="btnPrev" class="refresh-btn">← Préc</button>
+        <button onclick="changePage(1)"  id="btnNext" class="refresh-btn">Suiv →</button>
+      </div>
+    </div>
+  </div>
+
+
+</main>
+
+<script>
+let ANON_KEY = localStorage.getItem('supabase_anon_key');
+if (!ANON_KEY) {
+  ANON_KEY = prompt('Entre ta clé Supabase anon key :');
+  if (ANON_KEY) localStorage.setItem('supabase_anon_key', ANON_KEY);
+}
+const _ref = JSON.parse(atob(ANON_KEY.split('.')[1])).ref;
+const API_URL = `https://${_ref}.supabase.co/functions/v1/get-logs`;
+const REFRESH_INTERVAL = 30;
+
+// ── Formatters ────────────────────────────────────────────────────────────────
+const fmtDate = iso => {
+  const d = new Date(iso);
+  return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' +
+         d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+};
+
+const timeAgo = iso => {
+  if (!iso) return null;
+  const diff = Math.round((Date.now() - new Date(iso)) / 1000);
+  if (diff < 60)   return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff/60)}m ${diff%60}s`;
+  return `${Math.floor(diff/3600)}h ${Math.floor((diff%3600)/60)}m`;
+};
+
+const escapeHtml = s =>
+  String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// ── Traduction du résultat en français lisible ────────────────────────────────
+const OK  = 'result-buy';   // vert  — tout va bien
+const ERR = 'result-error'; // rouge — action requise
+
+function humanResult(r) {
+  if (r.timed_out)        return { label: 'Timeout — la fonction a mis trop longtemps à répondre', cls: ERR };
+  if (!r.http_status)     return { label: 'Pas de réponse — la fonction n\'a pas répondu du tout', cls: ERR };
+  if (r.http_status === 401) return { label: 'Accès refusé — clé d\'authentification invalide', cls: ERR };
+
+  let content = null;
+  try { content = JSON.parse(r.http_content); } catch {}
+
+  if (r.http_status === 500) {
+    const msg = content?.message ? ` : ${escapeHtml(content.message)}` : '';
+    return { label: `Crash de la fonction${msg}`, cls: ERR };
+  }
+  if (r.http_status !== 200) return { label: `Erreur serveur inattendue (HTTP ${r.http_status})`, cls: ERR };
+  if (!content) return { label: 'Réponse illisible — JSON invalide retourné par la fonction', cls: ERR };
+
+  switch (content.status) {
+    case 'market_closed':    return { label: 'Marché fermé — aucune action', cls: OK };
+    case 'already_running':  return { label: 'Cycle ignoré — un autre cycle était déjà en cours', cls: ERR };
+    case 'grok_parse_error': return { label: 'Erreur IA — Grok n\'a pas retourné une réponse exploitable', cls: ERR };
+    case 'ok': {
+      const decisions = content.decisions ?? [];
+      const trades = decisions.filter(d => d.action === 'BUY' || d.action === 'SELL');
+      if (!trades.length) return { label: 'HOLD — Grok ne voit pas d\'opportunité ce cycle', cls: OK };
+      const parts = trades.map(d =>
+        d.action === 'BUY'
+          ? `Achat de ${d.quantity} ${d.symbol}`
+          : `Vente de ${d.quantity} ${d.symbol}`
+      );
+      return { label: parts.join(' + '), cls: OK };
+    }
+    default: return { label: `Statut inconnu : ${escapeHtml(content.status ?? '—')}`, cls: ERR };
+  }
+}
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 40;
+let allRuns = [];
+let currentPage = 0;
+
+function renderPage() {
+  const tbody = document.getElementById('runsBody');
+  const total = allRuns.length;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const start = currentPage * PAGE_SIZE;
+  const page = allRuns.slice(start, start + PAGE_SIZE);
+
+  document.getElementById('runsCount').textContent = `${total} cycles`;
+
+  tbody.innerHTML = page.map(r => {
+    const { label, cls } = humanResult(r);
+    const rawLog = escapeHtml(r.http_content ?? r.error ?? '—');
+    const isLong = rawLog.length > 60;
+    return `<tr>
+      <td class="td-time">${fmtDate(r.started_at)}</td>
+      <td><span class="result-badge ${cls}"><span class="dot"></span>${label}</span></td>
+      <td class="td-detail ${isLong ? 'expandable' : ''}" onclick="this.classList.toggle('expanded')">${rawLog}</td>
+    </tr>`;
+  }).join('');
+
+  const pagination = document.getElementById('pagination');
+  if (totalPages > 1) {
+    pagination.style.display = 'flex';
+    document.getElementById('pageInfo').textContent = `Page ${currentPage + 1} / ${totalPages}`;
+    document.getElementById('btnPrev').disabled = currentPage === 0;
+    document.getElementById('btnNext').disabled = currentPage >= totalPages - 1;
+  } else {
+    pagination.style.display = 'none';
+  }
+}
+
+function changePage(dir) {
+  currentPage += dir;
+  renderPage();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Render run history ────────────────────────────────────────────────────────
+function renderRuns(runs) {
+  if (!runs.length) {
+    document.getElementById('runsBody').innerHTML = `<tr><td colspan="3" style="padding:24px 16px; text-align:center; font-family:'JetBrains Mono',monospace; font-size:12px; color:#444">Aucun cycle enregistré</td></tr>`;
+    document.getElementById('runsCount').textContent = '0 cycles';
+    return;
+  }
+  allRuns = runs;
+  currentPage = 0;
+  renderPage();
+}
+
+
+// ── Countdown ─────────────────────────────────────────────────────────────────
+let countdownValue = REFRESH_INTERVAL;
+let countdownTimer = null;
+
+function startCountdown() {
+  clearInterval(countdownTimer);
+  countdownValue = REFRESH_INTERVAL;
+  countdownTimer = setInterval(() => {
+    countdownValue--;
+    document.getElementById('countdownText').textContent = `${countdownValue}s`;
+    document.getElementById('countdownFill').style.width = `${(countdownValue / REFRESH_INTERVAL) * 100}%`;
+    if (countdownValue <= 0) loadAll();
+  }, 1000);
+}
+
+// ── Main load ─────────────────────────────────────────────────────────────────
+async function loadAll() {
+  startCountdown();
+
+  const data = await fetch(API_URL, {
+    headers: { Authorization: `Bearer ${ANON_KEY}` }
+  }).then(r => r.json()).catch(() => null);
+
+  if (!data) return;
+
+  renderRuns(data.runs ?? []);
+
+  const now = new Date();
+  document.getElementById('lastRefresh').textContent =
+    `Actualisé à ${now.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+}
+
+function triggerRefresh() {
+  const btn = document.getElementById('refreshBtn');
+  btn.classList.add('spinning');
+  loadAll().finally(() => btn.classList.remove('spinning'));
+}
+
+loadAll();
+</script>
+
+</body>
+</html>

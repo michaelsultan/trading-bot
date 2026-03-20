@@ -1,0 +1,9 @@
+.env
+supabase/.temp
+node_modules
+supabase/scripts/
+.DS_Store
+.claude/
+sessions/
+CLAUDE.md
+PRD.md
