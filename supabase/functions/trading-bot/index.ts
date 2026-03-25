@@ -2411,7 +2411,7 @@ function quantPick(
   allScores.sort((a, b) => b.score - a.score);
 
   // Minimum score threshold: backtest-proven optimal — more trades = more edge
-  const MIN_SCORE = 35;  // Config C: very low bar — take more trades for higher volume
+  const MIN_SCORE = 28;  // Config C: very low bar — take more trades for higher volume
   const topPicks = allScores.filter(s => s.score >= MIN_SCORE).slice(0, maxPicks);
 
   console.log(`🧮 QUANT SCORES (top 10): ${allScores.slice(0, 10).map(s => `${s.symbol}=${s.score}`).join(", ")}`);
@@ -3400,7 +3400,7 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     // Previous threshold of 60 was blocking ALL candidates during lunch (contradicts Config C "max trades" philosophy).
     if (decision.action === "BUY" && etHour >= 12 && etHour < 14) {
       const lunchScore = quantScores.find(s => s.symbol === decision.symbol)?.score ?? 0;
-      const LUNCH_MIN_SCORE = 45;  // Config C: 25 (was 60 — too aggressive, killed all midday trades)
+      const LUNCH_MIN_SCORE = 34;  // Config C: 25 (was 60 — too aggressive, killed all midday trades)
       if (lunchScore < LUNCH_MIN_SCORE) {
         debugLog.push(`${decision.symbol}: BLOCKED — lunch lull (score ${lunchScore} < ${LUNCH_MIN_SCORE} threshold)`);
         continue;
