@@ -258,13 +258,14 @@ export function quantScore(
   }
   score += Math.min(20, volumeScore);
 
-  // 3. RSI SIGNAL (0-15 pts)
+  // 3. RSI SIGNAL (0-15 pts) — tightened: "normal" RSI no longer maxes out
   let rsiSignal = 0;
   if (tech.rsi14 !== null) {
-    if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 15; }
-    else if (tech.rsi14 < 30) { rsiSignal = 12; reasons.push(`RSI=${tech.rsi14} oversold`); }
-    else if (tech.rsi14 >= 30 && tech.rsi14 < 40) { rsiSignal = 8; }
-    else if (tech.rsi14 > 65 && tech.rsi14 <= 75) { rsiSignal = 5; }
+    if (tech.rsi14 < 30) { rsiSignal = 15; reasons.push(`RSI=${tech.rsi14} deeply oversold`); }
+    else if (tech.rsi14 >= 30 && tech.rsi14 < 35) { rsiSignal = 12; reasons.push(`RSI=${tech.rsi14} oversold`); }
+    else if (tech.rsi14 >= 35 && tech.rsi14 < 40) { rsiSignal = 10; }
+    else if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 8; }
+    else if (tech.rsi14 > 65 && tech.rsi14 <= 75) { rsiSignal = 3; }
     else if (tech.rsi14 > 75) { rsiSignal = 0; }
   }
   score += rsiSignal;
@@ -442,6 +443,14 @@ export function quantScore(
   // SMA TREND
   if (tech.sma20 && tech.sma50 && tech.price > tech.sma20 && tech.sma20 > tech.sma50) {
     score += 3;
+  }
+
+  // MULTI-SIGNAL GATE: require at least 2 non-zero core signals to avoid single-signal junk trades
+  const nonZeroSignals = [momentum, volumeScore, rsiSignal, macdSignal, patternScore, socialBuzz, optionsFlowScore]
+    .filter(s => s > 0).length;
+  if (nonZeroSignals < 2) {
+    score = Math.min(score, 20); // cap at 20 — never clears MIN_SCORE of 35
+    reasons.push(`⛔ single-signal (${nonZeroSignals}/7)`);
   }
 
   score = Math.max(0, Math.min(100, score));

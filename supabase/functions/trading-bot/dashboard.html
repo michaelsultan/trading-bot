@@ -47,7 +47,7 @@
         .header h1 { font-size:22px; font-weight:700; display:flex; align-items:center; gap:10px; }
         .header h1 .dot { width:10px; height:10px; border-radius:50%; background:var(--green); display:inline-block; animation: pulse 2s infinite; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        .header-right { display:flex; gap:10px; align-items:center; }
+        .header-right { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
 
         /* Connection bar */
         .connection-bar {
@@ -231,6 +231,8 @@
             .connection-bar { grid-template-columns:1fr; }
             .positions-grid { grid-template-columns:1fr; }
             .alpaca-bar { flex-direction:column; }
+            .header { flex-direction:column; align-items:flex-start; }
+            .header-right { width:100%; justify-content:flex-start; }
         }
     </style>
 </head>
@@ -308,9 +310,14 @@
             <div class="kpi-sub neutral" id="kpi-cash-sub">—</div>
         </div>
         <div class="kpi-card red">
-            <div class="kpi-label">Realized PnL</div>
+            <div class="kpi-label">Today's Realized PnL</div>
             <div class="kpi-value" id="kpi-realized">—</div>
             <div class="kpi-sub neutral" id="kpi-realized-sub">—</div>
+        </div>
+        <div class="kpi-card purple">
+            <div class="kpi-label">This Week's PnL</div>
+            <div class="kpi-value" id="kpi-week-pnl">—</div>
+            <div class="kpi-sub neutral" id="kpi-week-pnl-sub">—</div>
         </div>
         <div class="kpi-card orange">
             <div class="kpi-label">Positions</div>
@@ -1526,11 +1533,9 @@ function renderAlpacaKPIs() {
     const totalUnrealized = alpacaPositions.reduce((s, p) => s + parseFloat(p.unrealized_pl), 0);
     const totalMarketValue = alpacaPositions.reduce((s, p) => s + Math.abs(parseFloat(p.market_value)), 0);
 
-    // Realized PnL = (Equity - Starting Capital) - Unrealized PnL
-    // Starting capital for paper = initial deposit. We can get it from portfolio history or use 100k default.
-    const startingCapital = alpacaPortfolioHistory?.base_value || 100000;
-    const totalPnl = equity - startingCapital;
-    const realizedPnl = totalPnl - totalUnrealized;
+    // Today's Realized PnL = today's total change - unrealized
+    // dayChange = equity - lastEquity (Alpaca resets daily)
+    const todayRealizedPnl = dayChange - totalUnrealized;
 
     // Equity
     setKPI('kpi-equity', `$${equity.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`,
@@ -1542,11 +1547,59 @@ function renderAlpacaKPIs() {
         `Across ${alpacaPositions.length} position${alpacaPositions.length !== 1 ? 's' : ''}`,
         totalUnrealized >= 0 ? 'positive' : 'negative');
 
-    // Realized PnL
-    const filledSells = alpacaOrders.filter(o => o.side === 'sell' && o.filled_qty && parseFloat(o.filled_qty) > 0);
-    setKPI('kpi-realized', `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`,
-        `${filledSells.length} sell${filledSells.length !== 1 ? 's' : ''} executed`,
-        realizedPnl >= 0 ? 'positive' : 'negative');
+    // Today's Realized PnL
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const todaySells = alpacaOrders.filter(o => o.side === 'sell' && o.filled_qty && parseFloat(o.filled_qty) > 0 && o.filled_at && o.filled_at.startsWith(todayStr));
+    setKPI('kpi-realized', `${todayRealizedPnl >= 0 ? '+' : ''}$${todayRealizedPnl.toFixed(2)}`,
+        `${todaySells.length} sell${todaySells.length !== 1 ? 's' : ''} today`,
+        todayRealizedPnl >= 0 ? 'positive' : 'negative');
+
+    // This Week's PnL (equity now vs Friday close, from portfolio history)
+    if (alpacaPortfolioHistory && alpacaPortfolioHistory.equity?.length > 0) {
+        const timestamps = alpacaPortfolioHistory.timestamp;
+        const equities = alpacaPortfolioHistory.equity;
+        // Find Monday of current week in ET
+        const nowET = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const monday = new Date(nowET);
+        monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+        monday.setHours(0, 0, 0, 0);
+        const mondayTs = monday.getTime() / 1000;
+        // Friday close equity = last data point before Monday
+        let fridayEquity = null;
+        for (let i = timestamps.length - 1; i >= 0; i--) {
+            if (timestamps[i] < mondayTs && equities[i] != null) {
+                fridayEquity = equities[i];
+                break;
+            }
+        }
+        // Count trading days this week
+        const seenDays = new Set();
+        for (let i = 0; i < timestamps.length; i++) {
+            if (timestamps[i] >= mondayTs) {
+                seenDays.add(new Date(timestamps[i] * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }));
+            }
+        }
+        const weekDays = seenDays.size;
+        if (fridayEquity != null) {
+            const weekPnl = equity - fridayEquity;
+            setKPI('kpi-week-pnl', `${weekPnl >= 0 ? '+' : ''}$${weekPnl.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`,
+                `${weekDays} trading day${weekDays !== 1 ? 's' : ''} · from $${fridayEquity.toLocaleString(undefined, {minimumFractionDigits:0})}`,
+                weekPnl >= 0 ? 'positive' : 'negative');
+        } else {
+            // No pre-Monday data — fall back to first equity this week
+            const firstWeekIdx = timestamps.findIndex(t => t >= mondayTs);
+            if (firstWeekIdx >= 0 && equities[firstWeekIdx] != null) {
+                const weekPnl = equity - equities[firstWeekIdx];
+                setKPI('kpi-week-pnl', `${weekPnl >= 0 ? '+' : ''}$${weekPnl.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`,
+                    `${weekDays} trading day${weekDays !== 1 ? 's' : ''} this week`,
+                    weekPnl >= 0 ? 'positive' : 'negative');
+            } else {
+                setKPI('kpi-week-pnl', '—', 'Not enough history yet', 'neutral');
+            }
+        }
+    } else {
+        setKPI('kpi-week-pnl', '—', 'Connect Alpaca for weekly data', 'neutral');
+    }
 
     // Cash
     setKPI('kpi-cash', `$${cash.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`,

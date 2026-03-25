@@ -2237,10 +2237,10 @@ function quantScore(
   // 3. RSI SIGNAL (0-15 pts)
   let rsiSignal = 0;
   if (tech.rsi14 !== null) {
-    if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 15; } // sweet spot — momentum without overextension
-    else if (tech.rsi14 < 30) { rsiSignal = 12; reasons.push(`RSI=${tech.rsi14} oversold`); } // oversold bounce
-    else if (tech.rsi14 >= 30 && tech.rsi14 < 40) { rsiSignal = 8; }
-    else if (tech.rsi14 > 65 && tech.rsi14 <= 75) { rsiSignal = 5; } // momentum but stretched
+    if (tech.rsi14 < 30) { rsiSignal = 15; reasons.push(`RSI=${tech.rsi14} deeply oversold`); } // sweet spot — momentum without overextension
+    else if (tech.rsi14 >= 30 && tech.rsi14 < 35) { rsiSignal = 12; reasons.push(`RSI=${tech.rsi14} oversold`); } // oversold bounce
+    else if (tech.rsi14 >= 35 && tech.rsi14 < 40) { rsiSignal = 10; } else if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 8; }
+    else if (tech.rsi14 > 65 && tech.rsi14 <= 75) { rsiSignal = 3; } // momentum but stretched
     else if (tech.rsi14 > 75) { rsiSignal = 0; } // overbought — skip
   }
   score += rsiSignal;
@@ -2313,6 +2313,9 @@ function quantScore(
     score += 3;
   }
 
+  // MULTI-SIGNAL GATE: require 2+ non-zero core signals
+  const nonZeroSignals = [momentum, volumeScore, rsiSignal, macdSignal, patternScore, socialBuzz, optionsFlowScore].filter(s => s > 0).length;
+  if (nonZeroSignals < 2) { score = Math.min(score, 20); reasons.push(`⛔ single-signal (${nonZeroSignals}/7)`); }
   // Clamp to 0-100
   score = Math.max(0, Math.min(100, score));
 
@@ -2408,7 +2411,7 @@ function quantPick(
   allScores.sort((a, b) => b.score - a.score);
 
   // Minimum score threshold: backtest-proven optimal — more trades = more edge
-  const MIN_SCORE = 20;  // Config C: very low bar — take more trades for higher volume
+  const MIN_SCORE = 35;  // Config C: very low bar — take more trades for higher volume
   const topPicks = allScores.filter(s => s.score >= MIN_SCORE).slice(0, maxPicks);
 
   console.log(`🧮 QUANT SCORES (top 10): ${allScores.slice(0, 10).map(s => `${s.symbol}=${s.score}`).join(", ")}`);
@@ -3397,7 +3400,7 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     // Previous threshold of 60 was blocking ALL candidates during lunch (contradicts Config C "max trades" philosophy).
     if (decision.action === "BUY" && etHour >= 12 && etHour < 14) {
       const lunchScore = quantScores.find(s => s.symbol === decision.symbol)?.score ?? 0;
-      const LUNCH_MIN_SCORE = 25;  // Config C: 25 (was 60 — too aggressive, killed all midday trades)
+      const LUNCH_MIN_SCORE = 45;  // Config C: 25 (was 60 — too aggressive, killed all midday trades)
       if (lunchScore < LUNCH_MIN_SCORE) {
         debugLog.push(`${decision.symbol}: BLOCKED — lunch lull (score ${lunchScore} < ${LUNCH_MIN_SCORE} threshold)`);
         continue;

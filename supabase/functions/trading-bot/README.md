@@ -1,202 +1,215 @@
 # Trading Bot
 
-Automated stock trading bot targeting $500/day on a $100K Alpaca paper portfolio.
+Automated stock trading bot that scans 181 stocks every 3 minutes and makes trades on your Alpaca paper trading account. Uses a scoring engine that analyzes momentum, volume, RSI, MACD, patterns, news sentiment, analyst ratings, and more to pick the best trades.
 
-Built on **Supabase Edge Functions** (Deno) with a 10-category quantitative scoring engine and 6 external intelligence layers.
+---
 
-## Architecture
+## Setup Guide (Step by Step)
 
-```
-Alpaca IEX Feed (181 stocks)
-        │
-        ▼
-┌─────────────────────────────────────┐
-│   Supabase Edge Function (Deno)     │
-│                                     │
-│  Scanner → Hot List → Technicals    │
-│       │                             │
-│       ▼                             │
-│  ┌──────────────────────────────┐   │
-│  │  Quant Scoring Engine (0-100)│   │
-│  │  + Massive Market Data       │   │
-│  │  + BigData/RavenPack         │   │
-│  │  + VIX Regime Detection      │   │
-│  │  + Short Interest Squeeze    │   │
-│  │  + Macro Economic Calendar   │   │
-│  └──────────────────────────────┘   │
-│       │                             │
-│       ▼                             │
-│  OTO Bracket Orders (ATR stops)     │
-│  → Alpaca Markets API               │
-└─────────────────────────────────────┘
-        │
-        ▼
-  Supabase PostgreSQL (trades, signals, metrics)
-```
+### What You Need Before Starting
 
-## Quick Start
+1. **A Mac or PC with a terminal** (Terminal on Mac, Command Prompt on Windows)
+2. **Node.js** installed -- download from [nodejs.org](https://nodejs.org/) (pick the LTS version, click Install, done)
+3. **An Alpaca account** -- sign up at [alpaca.markets](https://alpaca.markets/) (free paper trading)
+4. **A Supabase account** -- sign up at [supabase.com](https://supabase.com/) (free tier works)
 
-### Prerequisites
+---
 
-- [Supabase CLI](https://supabase.com/docs/guides/cli) (`npm install -g supabase`)
-- [Alpaca Markets](https://alpaca.markets/) paper trading account (free)
-- [xAI / Grok](https://x.ai/) API key (for sell-side risk assessment)
-- [Finnhub](https://finnhub.io/) API key (free tier works)
+### Step 1: Get Your API Keys
 
-### 1. Create a Supabase Project
+You need 4 keys. Here's where to find each one:
 
-Go to [supabase.com](https://supabase.com) and create a new project. Note your **project ID** (from the URL: `supabase.com/dashboard/project/<PROJECT_ID>`).
+**Alpaca (required):**
+1. Log in to [app.alpaca.markets](https://app.alpaca.markets/)
+2. Make sure you're on **Paper Trading** (toggle at the top)
+3. Go to the API Keys section on the home page
+4. Click "Generate New Key"
+5. Save both the **API Key** and the **Secret Key** -- you'll need both
 
-### 2. Clone and Link
+**Grok / xAI (required for AI sell decisions):**
+1. Go to [console.x.ai](https://console.x.ai/)
+2. Sign up and create an API key
+3. Save the key
+
+**Finnhub (required for news data):**
+1. Go to [finnhub.io](https://finnhub.io/)
+2. Sign up (free)
+3. Your API key is on the dashboard right after login
+4. Save the key
+
+**BOT_SECRET (make one up):**
+- This is just a password the bot uses internally
+- Pick any random word or phrase, like `mybot2026secret`
+- Save it
+
+---
+
+### Step 2: Create a Supabase Project
+
+1. Log in to [supabase.com](https://supabase.com/dashboard)
+2. Click **"New Project"**
+3. Give it a name (e.g., "trading-bot")
+4. Choose a database password (save it somewhere)
+5. Pick a region close to you
+6. Click **"Create new project"** and wait ~2 minutes
+7. Once ready, look at the URL in your browser -- it will look like:
+   `https://supabase.com/dashboard/project/abcdefghijklmnop`
+   The part after `/project/` is your **Project ID** -- save it
+
+---
+
+### Step 3: Set Up the Database
+
+1. In your Supabase dashboard, click **"SQL Editor"** in the left sidebar
+2. Click **"New query"**
+3. Open the file `setup/schema.sql` from this repo (you can view it on GitHub)
+4. Copy the **entire contents** of that file
+5. Paste it into the SQL Editor
+6. Click **"Run"** (the green play button)
+7. You should see "Success" -- your database is ready
+
+---
+
+### Step 4: Download and Deploy the Bot
+
+Open your terminal (on Mac: search for "Terminal" in Spotlight) and run these commands one at a time:
 
 ```bash
-git clone <your-repo-url> trading-bot
+# Install the Supabase CLI (one-time setup)
+npm install -g supabase
+
+# Download the bot code
+git clone https://github.com/michaelsultan/trading-bot.git
 cd trading-bot
-npx supabase link --project-ref <YOUR_PROJECT_ID>
+
+# Connect to your Supabase project (replace YOUR_PROJECT_ID with the ID from Step 2)
+npx supabase link --project-ref YOUR_PROJECT_ID
 ```
 
-### 3. Create Database Tables
+It will ask for your database password -- enter the one you chose in Step 2.
 
-Run the SQL in `setup/schema.sql` via the Supabase SQL Editor or CLI:
+Now set your API keys (replace each placeholder with your actual keys from Step 1):
 
 ```bash
-npx supabase db push
+npx supabase secrets set ALPACA_API_KEY=paste-your-alpaca-key-here
+npx supabase secrets set ALPACA_SECRET=paste-your-alpaca-secret-here
+npx supabase secrets set GROK_API_KEY=paste-your-xai-key-here
+npx supabase secrets set FINNHUB_API_KEY=paste-your-finnhub-key-here
+npx supabase secrets set BOT_SECRET=mybot2026secret
 ```
 
-Or paste the contents of `setup/schema.sql` into the SQL Editor at:
-`https://supabase.com/dashboard/project/<YOUR_PROJECT_ID>/sql`
-
-### 4. Set Secrets
-
-```bash
-npx supabase secrets set ALPACA_API_KEY=<your-alpaca-key>
-npx supabase secrets set ALPACA_SECRET=<your-alpaca-secret>
-npx supabase secrets set GROK_API_KEY=<your-xai-key>
-npx supabase secrets set FINNHUB_API_KEY=<your-finnhub-key>
-npx supabase secrets set BOT_SECRET=<any-random-string>
-```
-
-### 5. Deploy
+Deploy the bot:
 
 ```bash
 npx supabase functions deploy trading-bot --no-verify-jwt
 ```
 
-### 6. Schedule the Bot (pg_cron)
+You should see "Function trading-bot deployed successfully" -- the bot code is now live on the cloud.
 
-In the Supabase SQL Editor, run:
+---
+
+### Step 5: Start the Bot (Schedule It)
+
+Go back to the **Supabase SQL Editor** and run this query. Replace the two placeholders:
+- `YOUR_PROJECT_ID` = your project ID from Step 2
+- `YOUR_BOT_SECRET` = the BOT_SECRET you chose in Step 1
 
 ```sql
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
 SELECT cron.schedule(
   'trading-bot-cycle',
   '*/3 * * * *',
   $$
   SELECT net.http_post(
-    url := 'https://<YOUR_PROJECT_ID>.supabase.co/functions/v1/trading-bot',
-    body := jsonb_build_object('secret', '<YOUR_BOT_SECRET>'),
+    url := 'https://YOUR_PROJECT_ID.supabase.co/functions/v1/trading-bot',
+    body := jsonb_build_object('secret', 'YOUR_BOT_SECRET'),
     headers := '{"Content-Type": "application/json"}'::jsonb
   );
   $$
 );
 ```
 
-Replace `<YOUR_PROJECT_ID>` and `<YOUR_BOT_SECRET>` with your values.
+Click **"Run"** -- and that's it. The bot is now running every 3 minutes during market hours (9:30 AM - 4:00 PM ET, Monday to Friday).
 
-This runs the bot every 3 minutes, Monday-Friday. The bot automatically detects market hours (9:30 AM - 4:00 PM ET) and skips cycles outside trading hours.
+---
 
-## Intelligence Layers (Optional but Recommended)
+### Step 6: Watch It Trade
 
-The bot works standalone with just Alpaca data, but performs best with external intelligence. These require **Cowork mode** with MCP connectors:
+Open the file `dashboard.html` in your browser (just double-click it from the downloaded folder). It will ask for:
+- **Supabase URL**: `https://YOUR_PROJECT_ID.supabase.co`
+- **Supabase Anon Key**: Find this in your Supabase dashboard under Settings > API > `anon` `public` key
 
-| Layer | Source | What It Provides | Scheduled Task |
-|-------|--------|-----------------|----------------|
-| Massive Market Data | Polygon.io MCP | Daily RSI, MACD, SMA, news sentiment, short volume | `massive-market-intel` (every 10 min) |
-| BigData/RavenPack | RavenPack MCP | Analyst ratings, price targets, earnings dates, sentiment | `bigdata-market-intel` (3x/day) |
-| VIX Regime | RavenPack MCP | Market regime detection (calm/normal/elevated/panic) | Included in bigdata task |
-| Short Interest | Polygon.io MCP | Short volume ratio for squeeze detection | Included in massive task |
-| Macro Calendar | RavenPack MCP | US economic calendar (HIGH/MEDIUM/LOW impact events) | Included in bigdata task |
+The dashboard shows your equity, trade history, open positions, and performance stats in real time.
 
-Without MCP connectors, the bot still uses its core 7 scoring categories (momentum, volume, RSI, MACD, patterns, social, options flow) and all risk management features.
+---
 
-## Scoring Engine
+## How It Works
 
-Each stock is scored 0-100 across 10 categories:
+The bot scans 181 stocks every 3 minutes and scores each one from 0-100 based on:
 
-| # | Category | Max Points | Source |
-|---|----------|-----------|--------|
-| 1 | Momentum | 25 | Alpaca snapshots |
-| 2 | Volume | 20 | Alpaca snapshots |
-| 3 | RSI Signal | 15 | Intraday technicals |
-| 4 | MACD Signal | 10 | Intraday technicals |
-| 5 | Pattern Score | 15 | Candlestick detection |
-| 6 | Social Buzz | 10 | Reddit/WSB |
-| 7 | Options Flow | 10 | Unusual Whales |
-| 8 | Massive News | +15 / -5 | Massive Market Data |
-| 9 | BigData Fundamentals | +17 / -10 | RavenPack |
-| 10 | Short Interest | +8 / -5 | Short volume data |
+- **Momentum** -- is the stock moving up in the right range?
+- **Volume** -- is there unusual buying activity?
+- **RSI** -- is the stock oversold or in a healthy trend?
+- **MACD** -- is the trend turning bullish?
+- **Chart Patterns** -- breakouts, double bottoms, etc.
+- **Social Buzz** -- is Reddit/WallStreetBets talking about it?
+- **Options Flow** -- are big traders making bullish bets?
 
-Minimum score to buy: **35** (adjusted dynamically by VIX regime).
+Stocks scoring above 35 get bought automatically. The bot also:
+- Sets automatic stop-losses on every trade
+- Limits positions to 6 at a time
+- Blocks buys on crashing stocks (down > 10%)
+- Flattens leveraged ETFs before market close
+- Adjusts position sizes based on market volatility (VIX)
 
-## Risk Management
-
-- **ATR-based stop-losses** on every trade (OTO bracket orders)
-- **VIX regime scaling**: Elevated VIX = smaller positions + higher score threshold
-- **Macro calendar**: Half-size positions on Fed/CPI/NFP days
-- **Correlation guard**: Max 2 leveraged bull, 1 bear, 3 total leveraged positions
-- **Intraday-only rule**: All leveraged ETFs flattened at 3:50 PM ET
-- **Bid-ask spread filter**: Skip trades with > 0.3% spread
-- **Smart cooldowns**: 60 min after loss, 15 min after profit
-- **Crash filter**: Block buys on stocks down > 10% intraday
+---
 
 ## Configuration
 
-All tunable parameters are in `supabase/functions/trading-bot/config.ts`:
+If your Alpaca paper account has a different starting balance than $100,000, edit the file `supabase/functions/trading-bot/config.ts` and change this line:
 
 ```typescript
-STARTING_CAPITAL = 100_000    // Starting portfolio value
-MAX_POSITIONS = 6             // Max simultaneous positions
-MIN_SCORE = 35                // Minimum quant score to buy
-MAX_PICKS = 4                 // Max buys per cycle
-DAILY_PROFIT_TARGET = 500     // $500/day target
-MAX_DRAWDOWN_PCT = 0.15       // 15% drawdown halt
-MAX_SPREAD_PCT = 0.003        // 0.3% max spread
+export const STARTING_CAPITAL = 100_000;  // Change to your starting balance
 ```
 
-## Project Structure
-
-```
-trading-bot/
-├── supabase/
-│   └── functions/
-│       └── trading-bot/
-│           ├── index.ts          # Main orchestrator
-│           ├── config.ts         # All tunable parameters
-│           ├── types.ts          # TypeScript interfaces
-│           ├── scoring.ts        # Quant scoring engine + intelligence layers
-│           ├── scanner.ts        # Market scanner + hot list builder
-│           ├── market-data.ts    # Technical analysis (RSI, MACD, patterns)
-│           ├── portfolio.ts      # Supabase client + portfolio queries
-│           ├── execution.ts      # Alpaca order execution (OTO brackets)
-│           ├── risk.ts           # Risk management (correlation, flatten, etc.)
-│           ├── sell-engine.ts    # Grok AI sell decisions
-│           ├── social.ts         # Reddit/WSB + Finnhub social signals
-│           └── utils.ts          # fetchWithTimeout, helpers
-├── setup/
-│   └── schema.sql               # Database schema (run this first)
-├── dashboard.html                # Real-time P&L dashboard
-├── deno.json                     # Deno configuration
-└── README.md                     # This file
+Then redeploy:
+```bash
+cd trading-bot
+npx supabase functions deploy trading-bot --no-verify-jwt
 ```
 
-## Dashboard
+---
 
-Open `dashboard.html` in a browser and enter your Supabase URL + anon key. It shows:
+## Stopping the Bot
 
-- Real-time equity curve
-- Trade history with entry/exit prices and P&L
-- Open positions
-- Performance metrics (win rate, Sharpe, drawdown)
+To pause the bot, go to the Supabase SQL Editor and run:
+
+```sql
+SELECT cron.unschedule('trading-bot-cycle');
+```
+
+To restart it, run the schedule command from Step 5 again.
+
+---
+
+## Troubleshooting
+
+**"Permission denied" in terminal:**
+Try adding `sudo` before the command, e.g., `sudo npm install -g supabase`
+
+**"Function not found" error:**
+Make sure you ran `npx supabase link` first and that the deploy command succeeded.
+
+**Bot not making trades:**
+The bot only trades during US market hours (9:30 AM - 4:00 PM Eastern, Mon-Fri). Check the Supabase dashboard under Edge Functions > Logs to see what it's doing.
+
+**Dashboard shows nothing:**
+Make sure you entered the correct Supabase URL and anon key. The URL format is `https://YOUR_PROJECT_ID.supabase.co` (no trailing slash).
+
+---
 
 ## License
 
-Private — do not redistribute without permission.
+Private -- do not redistribute without permission.
