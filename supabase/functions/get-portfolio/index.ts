@@ -12,7 +12,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, content-type",
 };
 
-const SUPABASE_REF = "bhumjspdeveqybkilcxc";
+const SUPABASE_REF = "rwfbleacxufaojkztxbj";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {

@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Backtest Report — Trading Bot</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+    <style>
+        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149; --blue: #58a6ff; --orange: #d29922; }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { font-size: 24px; margin-bottom: 8px; }
+        .subtitle { color: var(--muted); margin-bottom: 24px; }
+        .verdict { font-size: 20px; padding: 16px; border-radius: 12px; margin-bottom: 24px; text-align: center; background: #3fb95015; border: 1px solid #3fb95040; color: #3fb950; font-weight: 700; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+        .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+        .stat .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+        .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 24px; }
+        .chart-card h2 { font-size: 16px; margin-bottom: 12px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); color: var(--muted); font-size: 11px; text-transform: uppercase; }
+        td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+        tr:hover { background: rgba(88,166,255,0.05); }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📊 Backtest Report — Trading Bot</h1>
+    <p class="subtitle">2025-09-24 → 2026-03-23 | 75 trading days | 25 stocks | $100,000 starting equity</p>
+
+    <div class="verdict">✅ Strategy looks promising</div>
+
+    <div class="grid">
+        <div class="stat"><div class="label">Total Return</div><div class="value" style="color:#3fb950">+15.75%</div></div>
+        <div class="stat"><div class="label">Annual Return</div><div class="value" style="color:#3fb950">+63.5%</div></div>
+        <div class="stat"><div class="label">Sharpe Ratio</div><div class="value" style="color:#3fb950">4.23</div></div>
+        <div class="stat"><div class="label">Max Drawdown</div><div class="value" style="color:#3fb950">2.3%</div></div>
+        <div class="stat"><div class="label">Win Rate</div><div class="value" style="color:#3fb950">60.2%</div></div>
+        <div class="stat"><div class="label">Profit Factor</div><div class="value">2.24</div></div>
+        <div class="stat"><div class="label">Total Trades</div><div class="value">128</div></div>
+        <div class="stat"><div class="label">Avg Daily P&L</div><div class="value" style="color:var(--green)">$+210</div></div>
+        <div class="stat"><div class="label">Avg Win</div><div class="value" style="color:var(--green)">+2.24%</div></div>
+        <div class="stat"><div class="label">Avg Loss</div><div class="value" style="color:var(--red)">-1.42%</div></div>
+        <div class="stat"><div class="label">Best Day</div><div class="value" style="color:var(--green)">$+2,837</div></div>
+        <div class="stat"><div class="label">Worst Day</div><div class="value" style="color:var(--red)">$-832</div></div>
+    </div>
+
+    <div class="chart-card">
+        <h2>Equity Curve</h2>
+        <canvas id="equityChart" height="100"></canvas>
+    </div>
+
+    <div class="chart-card">
+        <h2>Daily P&L</h2>
+        <canvas id="pnlChart" height="80"></canvas>
+    </div>
+
+    <div class="chart-card">
+        <h2>Recent Trades (last 50)</h2>
+        <div style="overflow-x:auto;">
+        <table>
+            <thead><tr><th>Date</th><th>Symbol</th><th>Reason</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>%</th></tr></thead>
+            <tbody>
+        <tr>
+            <td>2026-03-20</td>
+            <td><b>RIVN</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$15.96</td>
+            <td>$15.56</td>
+            <td>1457</td>
+            <td style="color:#f85149">$-581.34</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-03-18</td>
+            <td><b>UBER</b></td>
+            <td>EOD flatten</td>
+            <td>$77.43</td>
+            <td>$76.66</td>
+            <td>301</td>
+            <td style="color:#f85149">$-231.77</td>
+            <td style="color:#f85149">-0.99%</td>
+        </tr>
+        <tr>
+            <td>2026-03-12</td>
+            <td><b>TSLA</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$405.18</td>
+            <td>$395.05</td>
+            <td>57</td>
+            <td style="color:#f85149">$-577.38</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-03-11</td>
+            <td><b>RIVN</b></td>
+            <td>Trail stop (+0.7% locked)</td>
+            <td>$16.55</td>
+            <td>$16.67</td>
+            <td>1413</td>
+            <td style="color:#3fb950">$+173.18</td>
+            <td style="color:#3fb950">+0.74%</td>
+        </tr>
+        <tr>
+            <td>2026-03-10</td>
+            <td><b>AMD</b></td>
+            <td>Trail stop (+0.8% locked)</td>
+            <td>$202.51</td>
+            <td>$204.11</td>
+            <td>115</td>
+            <td style="color:#3fb950">$+184.11</td>
+            <td style="color:#3fb950">+0.79%</td>
+        </tr>
+        <tr>
+            <td>2026-03-09</td>
+            <td><b>BA</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$226.75</td>
+            <td>$221.08</td>
+            <td>103</td>
+            <td style="color:#f85149">$-583.88</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-03-06</td>
+            <td><b>SOFI</b></td>
+            <td>Trail stop (+2.9% locked)</td>
+            <td>$18.49</td>
+            <td>$19.01</td>
+            <td>1013</td>
+            <td style="color:#3fb950">$+535.94</td>
+            <td style="color:#3fb950">+2.86%</td>
+        </tr>
+        <tr>
+            <td>2026-03-06</td>
+            <td><b>CRWD</b></td>
+            <td>Trail stop (+0.6% locked)</td>
+            <td>$425.96</td>
+            <td>$428.51</td>
+            <td>54</td>
+            <td style="color:#3fb950">$+137.46</td>
+            <td style="color:#3fb950">+0.60%</td>
+        </tr>
+        <tr>
+            <td>2026-03-05</td>
+            <td><b>MARA</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$9.09</td>
+            <td>$8.86</td>
+            <td>1644</td>
+            <td style="color:#f85149">$-373.60</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-03-05</td>
+            <td><b>TSLA</b></td>
+            <td>Trail stop (+0.5% locked)</td>
+            <td>$401.57</td>
+            <td>$403.72</td>
+            <td>46</td>
+            <td style="color:#3fb950">$+98.74</td>
+            <td style="color:#3fb950">+0.53%</td>
+        </tr>
+        <tr>
+            <td>2026-03-05</td>
+            <td><b>CRWD</b></td>
+            <td>Trail stop (+4.2% locked)</td>
+            <td>$407.30</td>
+            <td>$424.53</td>
+            <td>56</td>
+            <td style="color:#3fb950">$+965.09</td>
+            <td style="color:#3fb950">+4.23%</td>
+        </tr>
+        <tr>
+            <td>2026-03-04</td>
+            <td><b>PLTR</b></td>
+            <td>Trail stop (+2.9% locked)</td>
+            <td>$148.43</td>
+            <td>$152.67</td>
+            <td>123</td>
+            <td style="color:#3fb950">$+521.00</td>
+            <td style="color:#3fb950">+2.85%</td>
+        </tr>
+        <tr>
+            <td>2026-03-04</td>
+            <td><b>CRWD</b></td>
+            <td>Trail stop (+4.5% locked)</td>
+            <td>$386.18</td>
+            <td>$403.51</td>
+            <td>59</td>
+            <td style="color:#3fb950">$+1,022.12</td>
+            <td style="color:#3fb950">+4.49%</td>
+        </tr>
+        <tr>
+            <td>2026-03-03</td>
+            <td><b>MARA</b></td>
+            <td>Trail stop (+0.3% locked)</td>
+            <td>$9.02</td>
+            <td>$9.05</td>
+            <td>1028</td>
+            <td style="color:#3fb950">$+30.92</td>
+            <td style="color:#3fb950">+0.33%</td>
+        </tr>
+        <tr>
+            <td>2026-03-03</td>
+            <td><b>UBER</b></td>
+            <td>Trail stop (+2.5% locked)</td>
+            <td>$74.50</td>
+            <td>$76.38</td>
+            <td>155</td>
+            <td style="color:#3fb950">$+290.99</td>
+            <td style="color:#3fb950">+2.52%</td>
+        </tr>
+        <tr>
+            <td>2026-03-03</td>
+            <td><b>NVDA</b></td>
+            <td>Trail stop (+0.1% locked)</td>
+            <td>$178.49</td>
+            <td>$178.73</td>
+            <td>80</td>
+            <td style="color:#3fb950">$+19.14</td>
+            <td style="color:#3fb950">+0.13%</td>
+        </tr>
+        <tr>
+            <td>2026-03-03</td>
+            <td><b>SOFI</b></td>
+            <td>Trail stop (+4.5% locked)</td>
+            <td>$18.00</td>
+            <td>$18.81</td>
+            <td>1003</td>
+            <td style="color:#3fb950">$+813.96</td>
+            <td style="color:#3fb950">+4.51%</td>
+        </tr>
+        <tr>
+            <td>2026-03-03</td>
+            <td><b>PLTR</b></td>
+            <td>Trail stop (+2.6% locked)</td>
+            <td>$142.10</td>
+            <td>$145.73</td>
+            <td>158</td>
+            <td style="color:#3fb950">$+573.54</td>
+            <td style="color:#3fb950">+2.55%</td>
+        </tr>
+        <tr>
+            <td>2026-03-02</td>
+            <td><b>MARA</b></td>
+            <td>Trail stop (+12.9% locked)</td>
+            <td>$8.61</td>
+            <td>$9.72</td>
+            <td>2045</td>
+            <td style="color:#3fb950">$+2,273.88</td>
+            <td style="color:#3fb950">+12.91%</td>
+        </tr>
+        <tr>
+            <td>2026-03-02</td>
+            <td><b>NFLX</b></td>
+            <td>Trail stop (+1.7% locked)</td>
+            <td>$95.26</td>
+            <td>$96.89</td>
+            <td>231</td>
+            <td style="color:#3fb950">$+377.26</td>
+            <td style="color:#3fb950">+1.71%</td>
+        </tr>
+        <tr>
+            <td>2026-02-27</td>
+            <td><b>CRWD</b></td>
+            <td>Trail stop (+-0.0% locked)</td>
+            <td>$369.06</td>
+            <td>$369.02</td>
+            <td>59</td>
+            <td style="color:#f85149">$-2.48</td>
+            <td style="color:#f85149">-0.01%</td>
+        </tr>
+        <tr>
+            <td>2026-02-26</td>
+            <td><b>CRWD</b></td>
+            <td>Trail stop (+3.6% locked)</td>
+            <td>$367.25</td>
+            <td>$380.47</td>
+            <td>24</td>
+            <td style="color:#3fb950">$+317.30</td>
+            <td style="color:#3fb950">+3.60%</td>
+        </tr>
+        <tr>
+            <td>2026-02-26</td>
+            <td><b>ABNB</b></td>
+            <td>Trail stop (+2.7% locked)</td>
+            <td>$132.20</td>
+            <td>$135.83</td>
+            <td>84</td>
+            <td style="color:#3fb950">$+305.36</td>
+            <td style="color:#3fb950">+2.75%</td>
+        </tr>
+        <tr>
+            <td>2026-02-26</td>
+            <td><b>MARA</b></td>
+            <td>Trail stop (+1.4% locked)</td>
+            <td>$8.43</td>
+            <td>$8.55</td>
+            <td>1650</td>
+            <td style="color:#3fb950">$+191.73</td>
+            <td style="color:#3fb950">+1.38%</td>
+        </tr>
+        <tr>
+            <td>2026-02-26</td>
+            <td><b>COIN</b></td>
+            <td>Trail stop (+1.5% locked)</td>
+            <td>$181.44</td>
+            <td>$184.15</td>
+            <td>95</td>
+            <td style="color:#3fb950">$+257.77</td>
+            <td style="color:#3fb950">+1.50%</td>
+        </tr>
+        <tr>
+            <td>2026-02-26</td>
+            <td><b>NFLX</b></td>
+            <td>Trail stop (+2.7% locked)</td>
+            <td>$83.20</td>
+            <td>$85.46</td>
+            <td>260</td>
+            <td style="color:#3fb950">$+588.12</td>
+            <td style="color:#3fb950">+2.72%</td>
+        </tr>
+        <tr>
+            <td>2026-02-25</td>
+            <td><b>AMD</b></td>
+            <td>Trail stop (+-0.3% locked)</td>
+            <td>$214.82</td>
+            <td>$214.10</td>
+            <td>64</td>
+            <td style="color:#f85149">$-46.11</td>
+            <td style="color:#f85149">-0.34%</td>
+        </tr>
+        <tr>
+            <td>2026-02-25</td>
+            <td><b>PYPL</b></td>
+            <td>Trail stop (+1.1% locked)</td>
+            <td>$47.38</td>
+            <td>$47.92</td>
+            <td>365</td>
+            <td style="color:#3fb950">$+196.37</td>
+            <td style="color:#3fb950">+1.14%</td>
+        </tr>
+        <tr>
+            <td>2026-02-25</td>
+            <td><b>NVDA</b></td>
+            <td>Trail stop (+0.4% locked)</td>
+            <td>$194.45</td>
+            <td>$195.26</td>
+            <td>111</td>
+            <td style="color:#3fb950">$+89.74</td>
+            <td style="color:#3fb950">+0.42%</td>
+        </tr>
+        <tr>
+            <td>2026-02-24</td>
+            <td><b>NVDA</b></td>
+            <td>Trail stop (+-0.0% locked)</td>
+            <td>$191.49</td>
+            <td>$191.44</td>
+            <td>88</td>
+            <td style="color:#f85149">$-3.98</td>
+            <td style="color:#f85149">-0.02%</td>
+        </tr>
+        <tr>
+            <td>2026-02-24</td>
+            <td><b>PYPL</b></td>
+            <td>Trail stop (+9.0% locked)</td>
+            <td>$43.49</td>
+            <td>$47.42</td>
+            <td>488</td>
+            <td style="color:#3fb950">$+1,917.35</td>
+            <td style="color:#3fb950">+9.03%</td>
+        </tr>
+        <tr>
+            <td>2026-02-23</td>
+            <td><b>GOOGL</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$319.05</td>
+            <td>$311.07</td>
+            <td>42</td>
+            <td style="color:#f85149">$-335.00</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-02-23</td>
+            <td><b>ABNB</b></td>
+            <td>Trail stop (+-0.4% locked)</td>
+            <td>$127.09</td>
+            <td>$126.61</td>
+            <td>134</td>
+            <td style="color:#f85149">$-64.03</td>
+            <td style="color:#f85149">-0.38%</td>
+        </tr>
+        <tr>
+            <td>2026-02-23</td>
+            <td><b>NVDA</b></td>
+            <td>Trail stop (+0.1% locked)</td>
+            <td>$191.40</td>
+            <td>$191.62</td>
+            <td>111</td>
+            <td style="color:#3fb950">$+24.71</td>
+            <td style="color:#3fb950">+0.12%</td>
+        </tr>
+        <tr>
+            <td>2026-02-20</td>
+            <td><b>ABNB</b></td>
+            <td>Trail stop (+0.9% locked)</td>
+            <td>$125.29</td>
+            <td>$126.46</td>
+            <td>169</td>
+            <td style="color:#3fb950">$+198.41</td>
+            <td style="color:#3fb950">+0.94%</td>
+        </tr>
+        <tr>
+            <td>2026-02-19</td>
+            <td><b>SHOP</b></td>
+            <td>Trail stop (+2.5% locked)</td>
+            <td>$120.13</td>
+            <td>$123.15</td>
+            <td>176</td>
+            <td style="color:#3fb950">$+532.26</td>
+            <td style="color:#3fb950">+2.52%</td>
+        </tr>
+        <tr>
+            <td>2026-02-17</td>
+            <td><b>COIN</b></td>
+            <td>Trail stop (+3.7% locked)</td>
+            <td>$162.48</td>
+            <td>$168.49</td>
+            <td>53</td>
+            <td style="color:#3fb950">$+318.72</td>
+            <td style="color:#3fb950">+3.70%</td>
+        </tr>
+        <tr>
+            <td>2026-02-17</td>
+            <td><b>CRWD</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$423.59</td>
+            <td>$413.00</td>
+            <td>25</td>
+            <td style="color:#f85149">$-264.75</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-02-17</td>
+            <td><b>ROKU</b></td>
+            <td>Trail stop (+1.7% locked)</td>
+            <td>$87.76</td>
+            <td>$89.27</td>
+            <td>153</td>
+            <td style="color:#3fb950">$+230.39</td>
+            <td style="color:#3fb950">+1.72%</td>
+        </tr>
+        <tr>
+            <td>2026-02-17</td>
+            <td><b>ABNB</b></td>
+            <td>Trail stop (+3.3% locked)</td>
+            <td>$122.08</td>
+            <td>$126.12</td>
+            <td>137</td>
+            <td style="color:#3fb950">$+553.23</td>
+            <td style="color:#3fb950">+3.31%</td>
+        </tr>
+        <tr>
+            <td>2026-02-17</td>
+            <td><b>RIVN</b></td>
+            <td>Trail stop (+0.3% locked)</td>
+            <td>$17.39</td>
+            <td>$17.45</td>
+            <td>1207</td>
+            <td style="color:#3fb950">$+70.10</td>
+            <td style="color:#3fb950">+0.33%</td>
+        </tr>
+        <tr>
+            <td>2026-02-11</td>
+            <td><b>ROKU</b></td>
+            <td>Stop loss (-2.5%)</td>
+            <td>$91.09</td>
+            <td>$88.81</td>
+            <td>231</td>
+            <td style="color:#f85149">$-526.04</td>
+            <td style="color:#f85149">-2.50%</td>
+        </tr>
+        <tr>
+            <td>2026-02-10</td>
+            <td><b>NVDA</b></td>
+            <td>EOD flatten</td>
+            <td>$191.38</td>
+            <td>$188.54</td>
+            <td>88</td>
+            <td style="color:#f85149">$-249.92</td>
+            <td style="color:#f85149">-1.48%</td>
+        </tr>
+        <tr>
+            <td>2026-02-10</td>
+            <td><b>SHOP</b></td>
+            <td>Trail stop (+3.7% locked)</td>
+            <td>$122.69</td>
+            <td>$127.28</td>
+            <td>110</td>
+            <td style="color:#3fb950">$+504.69</td>
+            <td style="color:#3fb950">+3.74%</td>
+        </tr>
+        <tr>
+            <td>2026-02-10</td>
+            <td><b>PANW</b></td>
+            <td>Trail stop (+-0.1% locked)</td>
+            <td>$166.39</td>
+            <td>$166.26</td>
+            <td>126</td>
+            <td style="color:#f85149">$-16.30</td>
+            <td style="color:#f85149">-0.08%</td>
+        </tr>
+        <tr>
+            <td>2026-02-09</td>
+            <td><b>MARA</b></td>
+            <td>Trail stop (+6.6% locked)</td>
+            <td>$7.85</td>
+            <td>$8.37</td>
+            <td>867</td>
+            <td style="color:#3fb950">$+449.42</td>
+            <td style="color:#3fb950">+6.60%</td>
+        </tr>
+        <tr>
+            <td>2026-02-09</td>
+            <td><b>AMD</b></td>
+            <td>Trail stop (+3.9% locked)</td>
+            <td>$206.90</td>
+            <td>$214.99</td>
+            <td>41</td>
+            <td style="color:#3fb950">$+331.64</td>
+            <td style="color:#3fb950">+3.91%</td>
+        </tr>
+        <tr>
+            <td>2026-02-09</td>
+            <td><b>TSLA</b></td>
+            <td>Trail stop (+1.5% locked)</td>
+            <td>$409.91</td>
+            <td>$416.19</td>
+            <td>25</td>
+            <td style="color:#3fb950">$+157.12</td>
+            <td style="color:#3fb950">+1.53%</td>
+        </tr>
+        <tr>
+            <td>2026-02-09</td>
+            <td><b>NVDA</b></td>
+            <td>Trail stop (+3.8% locked)</td>
+            <td>$184.26</td>
+            <td>$191.34</td>
+            <td>71</td>
+            <td style="color:#3fb950">$+502.40</td>
+            <td style="color:#3fb950">+3.84%</td>
+        </tr>
+        <tr>
+            <td>2026-02-09</td>
+            <td><b>PLTR</b></td>
+            <td>Trail stop (+5.5% locked)</td>
+            <td>$136.58</td>
+            <td>$144.12</td>
+            <td>120</td>
+            <td style="color:#3fb950">$+904.75</td>
+            <td style="color:#3fb950">+5.52%</td>
+        </tr></tbody>
+        </table>
+        </div>
+    </div>
+
+    <div class="chart-card" style="text-align:center; color:var(--muted); font-size:13px;">
+        <p>⚠️ Past performance does not guarantee future results. This backtest uses closing prices and does not account for slippage, partial fills, or market impact.</p>
+        <p>Generated 2026-03-23 22:48 | Trading Bot Backtester v1.0</p>
+    </div>
+</div>
+
+<script>
+const dates = ["2025-12-03", "2025-12-04", "2025-12-05", "2025-12-08", "2025-12-09", "2025-12-10", "2025-12-11", "2025-12-12", "2025-12-15", "2025-12-16", "2025-12-17", "2025-12-18", "2025-12-19", "2025-12-22", "2025-12-23", "2025-12-24", "2025-12-26", "2025-12-29", "2025-12-30", "2025-12-31", "2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-16", "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23", "2026-01-26", "2026-01-27", "2026-01-28", "2026-01-29", "2026-01-30", "2026-02-02", "2026-02-03", "2026-02-04", "2026-02-05", "2026-02-06", "2026-02-09", "2026-02-10", "2026-02-11", "2026-02-12", "2026-02-13", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-23", "2026-02-24", "2026-02-25", "2026-02-26", "2026-02-27", "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-09", "2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13", "2026-03-16", "2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20", "2026-03-23"];
+const equity = [99503.84, 99422.29, 99422.29, 99569.21, 100229.27, 99728.46, 100051.67, 100031.22, 100031.22, 100031.22, 100119.32, 100398.94, 101609.61, 101264.14, 101106.7, 101106.7, 101106.7, 101106.7, 101106.7, 101106.7, 101106.7, 102403.87, 101810.76, 102410.42, 101578.15, 101745.68, 102517.42, 102661.93, 103117.77, 103141.5, 102729.56, 103496.0, 104703.14, 104859.39, 104827.69, 104554.54, 104554.54, 104544.27, 104021.74, 103621.94, 104112.41, 103650.74, 103134.0, 102969.72, 102456.39, 105293.16, 105531.63, 105005.59, 105005.59, 105005.59, 105913.28, 105913.28, 106445.54, 106643.95, 106269.63, 108183.0, 108423.0, 110083.28, 110080.8, 112731.94, 114460.48, 116003.6, 116693.83, 117367.22, 116783.34, 116967.45, 117140.62, 116563.24, 116563.24, 116563.24, 116563.24, 116331.47, 116331.47, 115750.13, 115750.13];
+const dailyPnl = [-496.16, -81.56, 0.0, 146.92, 660.06, -500.8, 323.21, -20.45, 0.0, 0.0, 88.1, 279.62, 1210.67, -345.48, -157.44, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1297.18, -593.11, 599.65, -832.27, 167.53, 771.74, 144.51, 455.84, 23.73, -411.94, 766.44, 1207.14, 156.25, -31.69, -273.15, 0.0, -10.28, -522.53, -399.79, 490.46, -461.67, -516.74, -164.28, -513.33, 2836.77, 238.47, -526.04, 0.0, 0.0, 907.69, 0.0, 532.26, 198.41, -374.32, 1913.37, 240.0, 1660.28, -2.48, 2651.14, 1728.54, 1543.12, 690.23, 673.39, -583.88, 184.11, 173.18, -577.38, 0.0, 0.0, 0.0, -231.77, 0.0, -581.34, 0.0];
+
+// Equity chart
+new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: {
+        labels: dates,
+        datasets: [{
+            label: 'Equity',
+            data: equity,
+            borderColor: '#58a6ff',
+            backgroundColor: 'rgba(88,166,255,0.1)',
+            fill: true,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+        }, {
+            label: 'Starting ($100K)',
+            data: Array(dates.length).fill(100000),
+            borderColor: '#484f58',
+            borderDash: [5, 5],
+            borderWidth: 1,
+            pointRadius: 0,
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: '#8b949e' } } },
+        scales: {
+            x: { ticks: { color: '#8b949e', maxTicksLimit: 12 }, grid: { color: '#21262d' } },
+            y: { ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() }, grid: { color: '#21262d' } }
+        }
+    }
+});
+
+// Daily P&L chart
+new Chart(document.getElementById('pnlChart'), {
+    type: 'bar',
+    data: {
+        labels: dates,
+        datasets: [{
+            label: 'Daily P&L',
+            data: dailyPnl,
+            backgroundColor: dailyPnl.map(v => v >= 0 ? 'rgba(63,185,80,0.7)' : 'rgba(248,81,73,0.7)'),
+            borderWidth: 0,
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { ticks: { color: '#8b949e', maxTicksLimit: 12 }, grid: { color: '#21262d' } },
+            y: { ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() }, grid: { color: '#21262d' } }
+        }
+    }
+});
+</script>
+</body>
+</html>

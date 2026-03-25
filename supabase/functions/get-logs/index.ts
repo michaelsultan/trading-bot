@@ -1,6 +1,6 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-const SUPABASE_REF = "bhumjspdeveqybkilcxc";
+const SUPABASE_REF = "rwfbleacxufaojkztxbj";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

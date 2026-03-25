@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+backtest_env/
+
+# Build artifacts
+__pycache__/
+*.pyc
+
+# Environment & secrets
+.env
+.env.local
+*.key
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Supabase local
+supabase/.temp/
+supabase/.branches/
+
+# Bundled deploy files (generated)
+supabase/functions/trading-bot/_bundled_*.ts
