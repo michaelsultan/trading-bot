@@ -122,7 +122,36 @@ async function cancelOrdersForSymbol(symbol: string) {
 }
 
 // Standard market order (used for SELL)
+// HARD BLOCK: Never trade these symbols
+const HARD_BLOCKED_SYMBOLS = new Set(["UVIX", "UVXY", "SVXY", "VXX", "VIXY", "SVOL"]);
+
 async function placeOrder(symbol: string, qty: number, side: "buy" | "sell") {
+  // Safety: prevent accidental short positions by verifying we actually hold shares before selling
+  if (side === "sell") {
+    try {
+      const posCheck = await fetchWithTimeout(`${ALPACA_BASE_URL}/positions/${symbol}`, { headers: alpacaHeaders });
+      if (posCheck.status === 404) {
+        console.error(`\u{26D4} SELL BLOCKED: No position found for ${symbol} — would create accidental short`);
+        return { code: 0, message: `${symbol} sell blocked: no position (prevent accidental short)` };
+      }
+      const posData = await posCheck.json();
+      const heldQty = parseInt(String(posData.qty ?? 0));
+      if (heldQty <= 0) {
+        console.error(`\u{26D4} SELL BLOCKED: ${symbol} position qty is ${heldQty} — would create accidental short`);
+        return { code: 0, message: `${symbol} sell blocked: qty ${heldQty} (prevent accidental short)` };
+      }
+      if (qty > heldQty) {
+        console.warn(`\u{26A0} SELL QTY ADJUSTED: ${symbol} trying to sell ${qty} but only hold ${heldQty} — adjusting down`);
+        qty = heldQty;
+      }
+    } catch (e) {
+      console.warn(`Position check failed for ${symbol}, proceeding with sell:`, (e as Error).message);
+    }
+  }
+  if (side === "buy" && HARD_BLOCKED_SYMBOLS.has(symbol)) {
+    console.error("❌ HARD BLOCK: " + symbol + " is permanently excluded");
+    return { code: 0, message: symbol + " is hard-blocked" };
+  }
   const res = await withRetry(() => fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
     method: "POST",
     headers: alpacaHeaders,
@@ -145,6 +174,10 @@ async function placeOrderWithStopLoss(
   entryPrice: number,
   stopLossPct = DEFAULT_STOP_LOSS_PCT
 ) {
+  if (HARD_BLOCKED_SYMBOLS.has(symbol)) {
+    console.error("❌ HARD BLOCK: " + symbol + " is permanently excluded");
+    return { code: 0, message: symbol + " is hard-blocked" };
+  }
   // Validate: entry price must be positive and stop % reasonable
   if (!entryPrice || entryPrice <= 0) {
     console.error(`BUY ${symbol} aborted — invalid entry price: $${entryPrice}`);
@@ -1927,8 +1960,7 @@ const FULL_UNIVERSE = [
   "COIN", "MSTR", "RIOT", "CLSK", "IBIT", "ETHA",
   // ETFs (sector rotation)
   "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XBI", "SMH", "ARKK",
-  // Volatility plays
-  "UVIX",
+  // Volatility plays — UVIX excluded (too volatile)
   // Small-cap momentum
   "PLUG", "FCEL", "SPCE", "OPEN", "CLOV",
   // ── Leveraged & Inverse ETFs (high-vol day-trade plays) ─────────────────────
@@ -1944,8 +1976,7 @@ const FULL_UNIVERSE = [
   "QID", "SDS", "SDD", "TWM", "SKF", "MZZ",
   // 2x Single-Stock ETFs (high beta plays)
   "NVDL", "NVDD", "TSLL", "TSLS", "AMDL", "AMZL", "MSFL", "GOOX", "CONL",
-  // Volatility products (VIX-based)
-  "UVXY", "SVXY", "VXX", "VIXY", "SVOL",
+  // Volatility products — ALL VIX-based ETFs excluded
 ];
 
 // ── BLACKLIST: Empty — leveraged/inverse ETFs now in FULL_UNIVERSE ────────────
@@ -1973,6 +2004,23 @@ const MAX_LEVERAGED_BEAR_POSITIONS = 1;
 const MAX_VOLATILITY_POSITIONS = 1;
 const MAX_TOTAL_LEVERAGED_POSITIONS = 3;
 
+// Opposing leveraged ETF pairs - block buying one side while holding the other
+const LEVERAGED_INVERSE_PAIRS: [string, string][] = [
+  ["SOXL", "SOXS"],   // semiconductors
+  ["TQQQ", "SQQQ"],   // Nasdaq 100
+  ["UPRO", "SPXU"],   // S&P 500 3x
+  ["SPXL", "SPXS"],   // S&P 500 3x (alt)
+  ["TECL", "TECS"],   // technology
+  ["FNGU", "FNGD"],   // FANG+
+  ["LABU", "LABD"],   // biotech
+  ["TNA", "TZA"],     // small cap
+  ["FAS", "FAZ"],     // financials
+  ["QLD", "QID"],     // Nasdaq 2x
+  ["SSO", "SDS"],     // S&P 500 2x
+  ["NVDL", "NVDD"],   // NVIDIA
+  ["TSLL", "TSLS"],   // Tesla
+];
+
 function checkCorrelationGuard(
   symbol: string,
   heldPositions: Record<string, unknown>[],
@@ -1980,6 +2028,17 @@ function checkCorrelationGuard(
   if (!ALL_LEVERAGED_ETFS.has(symbol)) return { allowed: true, reason: "" };
 
   const heldSymbols = heldPositions.map(p => p.symbol as string);
+
+  // Block opposing pairs - never hold bull + bear of same sector
+  for (const [bull, bear] of LEVERAGED_INVERSE_PAIRS) {
+    if (symbol === bear && heldSymbols.includes(bull)) {
+      return { allowed: false, reason: `Cannot buy ${bear} (bear) while holding ${bull} (bull) - opposing pair` };
+    }
+    if (symbol === bull && heldSymbols.includes(bear)) {
+      return { allowed: false, reason: `Cannot buy ${bull} (bull) while holding ${bear} (bear) - opposing pair` };
+    }
+  }
+
   const heldBull = heldSymbols.filter(s => LEVERAGED_BULL_ETFS.has(s)).length;
   const heldBear = heldSymbols.filter(s => LEVERAGED_BEAR_ETFS.has(s)).length;
   const heldVol = heldSymbols.filter(s => VOLATILITY_ETFS.has(s)).length;
@@ -2239,7 +2298,7 @@ function quantScore(
   if (tech.rsi14 !== null) {
     if (tech.rsi14 < 30) { rsiSignal = 15; reasons.push(`RSI=${tech.rsi14} deeply oversold`); } // sweet spot — momentum without overextension
     else if (tech.rsi14 >= 30 && tech.rsi14 < 35) { rsiSignal = 12; reasons.push(`RSI=${tech.rsi14} oversold`); } // oversold bounce
-    else if (tech.rsi14 >= 35 && tech.rsi14 < 40) { rsiSignal = 10; } else if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 8; }
+    else if (tech.rsi14 >= 35 && tech.rsi14 < 40) { rsiSignal = 10; } else if (tech.rsi14 >= 40 && tech.rsi14 <= 65) { rsiSignal = 15; }
     else if (tech.rsi14 > 65 && tech.rsi14 <= 75) { rsiSignal = 3; } // momentum but stretched
     else if (tech.rsi14 > 75) { rsiSignal = 0; } // overbought — skip
   }
@@ -2313,9 +2372,6 @@ function quantScore(
     score += 3;
   }
 
-  // MULTI-SIGNAL GATE: require 2+ non-zero core signals
-  const nonZeroSignals = [momentum, volumeScore, rsiSignal, macdSignal, patternScore, socialBuzz, optionsFlowScore].filter(s => s > 0).length;
-  if (nonZeroSignals < 2) { score = Math.min(score, 20); reasons.push(`⛔ single-signal (${nonZeroSignals}/7)`); }
   // Clamp to 0-100
   score = Math.max(0, Math.min(100, score));
 
@@ -3207,13 +3263,16 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   const { mode: tradingMode, label: tradingModeLabel } = getCurrentTradingMode();
   console.log(`Trading mode: ${tradingModeLabel}`);
 
+  // Track symbols already sold by EOD flatten to prevent double-sell
+  const soldSymbols = new Set<string>();
+
   // ── EOD FULL FLATTEN: Close ALL positions before market close ──────────────
   // Pure day-trading strategy — no overnight holds for any position.
   // EXCEPTION: Stocks with after-market-close (AMC) earnings today that are
   //   (a) in profit AND (b) NOT leveraged ETFs can be held overnight.
   //   Rationale: strong earnings can produce 5-15% gap-ups overnight.
   //   Leveraged ETFs are ALWAYS flattened (decay + unpredictable gaps).
-  const FLATTEN_HOUR = 15; const FLATTEN_MINUTE = 50; // 3:50 PM ET
+  const FLATTEN_HOUR = 15; const FLATTEN_MINUTE = 45; // 3:45 PM ET — earlier cutoff, nuclear liquidation handles the rest
   const EARNINGS_HOLD_MIN_PROFIT_PCT = 0.005; // must be at least +0.5% to hold through earnings
   if (etHour > FLATTEN_HOUR || (etHour === FLATTEN_HOUR && etMin >= FLATTEN_MINUTE)) {
     // Check which held symbols have AMC earnings today
@@ -3245,6 +3304,7 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       console.log(`🌙 EOD FLATTEN: Closing ${sym} (${qty} shares)${isLev ? " [leveraged]" : ""} — no overnight holds`);
       await cancelOrdersForSymbol(sym);
       const order = await placeOrder(sym, qty, "sell");
+      soldSymbols.add(sym);
       if (order?.id) {
         await logTrade({
           symbol: sym, action: "SELL", quantity: qty,
@@ -3253,6 +3313,8 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
           price_exit: currentPrice,
           alpaca_order_id: order.id, status: "closed",
         });
+        await closeBuyTrade(sym, currentPrice);
+        await closeBuyTrade(sym, currentPrice);
       }
     }
   }
@@ -3276,6 +3338,12 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     const qty = parseInt(String(pos.qty));
     const sym = pos.symbol as string;
     const entryPrice = parseFloat(String(pos.avg_entry_price ?? 0));
+
+    // Skip if already sold by EOD flatten (prevents double-sell -> accidental short)
+    if (soldSymbols.has(sym)) {
+      debugLog.push(`${sym}: SKIP profit-take — already sold by EOD flatten`);
+      continue;
+    }
 
     // Skip if Grok already wants to sell
     const grokWantsSell = decisions.some((d: Record<string, unknown>) => d.symbol === sym && d.action === "SELL");
@@ -3323,6 +3391,8 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
           alpaca_order_id: order.id,
           status: "closed",
         });
+        if (reason.includes("ALL")) await closeBuyTrade(sym, parseFloat(String(pos.current_price ?? 0)));
+        if (reason.includes("ALL")) await closeBuyTrade(sym, parseFloat(String(pos.current_price ?? 0)));
       } else {
         console.error(`Profit-take order failed for ${sym}:`, order);
       }
@@ -3538,15 +3608,9 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       // Sector concentration guard
       const sectorCheck = checkSectorConcentration(positions as Record<string, unknown>[], decision.symbol);
       if (!sectorCheck.allowed) {
-        debugLog.push(`${decision.symbol}: BLOCKED — sector concentration: ${sectorCheck.reason}`);
-        console.warn(`BUY blocked — sector concentration: ${sectorCheck.reason}`);
-        await logTrade({
-          symbol: decision.symbol,
-          action: "BUY_BLOCKED",
-          quantity: finalQty,
-          reason: sectorCheck.reason!,
-          status: "error",
-        });
+        debugLog.push(decision.symbol + ": BLOCKED sector: " + sectorCheck.reason);
+        console.warn("BUY blocked sector: " + sectorCheck.reason);
+        await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: finalQty, reason: sectorCheck.reason, status: "error" });
         continue;
       }
 
@@ -3729,6 +3793,97 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // ── EOD NUCLEAR LIQUIDATION MODE ──────────────────────────────────────────
+    // Dedicated mode that BYPASSES market-closed check and force-sells everything.
+    // Called by a separate cron job at 3:50 and 3:55 PM ET.
+    if (mode === "eod_liquidate") {
+      console.log("🔴 EOD NUCLEAR LIQUIDATION — force-closing ALL positions");
+
+      // Step 1: Cancel ALL open orders (frees shares held by bracket orders)
+      try {
+        const cancelRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
+          method: "DELETE",
+          headers: alpacaHeaders,
+        });
+        console.log(`  Cancelled all open orders: ${cancelRes.status}`);
+      } catch (e) {
+        console.error("  Failed to cancel all orders:", (e as Error).message);
+      }
+      await new Promise(r => setTimeout(r, 2000)); // wait for Alpaca to release shares
+
+      // Step 2: Get current positions
+      let positions: Record<string, unknown>[] = [];
+      try {
+        const posRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/positions`, {
+          headers: alpacaHeaders,
+        });
+        positions = await posRes.json() as Record<string, unknown>[];
+      } catch (e) {
+        console.error("  Failed to fetch positions:", (e as Error).message);
+      }
+
+      if (!Array.isArray(positions) || positions.length === 0) {
+        console.log("  ✅ No positions to close — portfolio is flat");
+        await supabase.rpc("release_bot_run");
+        return new Response(JSON.stringify({ status: "eod_liquidate_done", positions_closed: 0 }), { status: 200 });
+      }
+
+      console.log(`  Found ${positions.length} open position(s) to liquidate`);
+
+      // Step 3: Nuclear option — bulk liquidate via DELETE /positions?cancel_orders=true
+      let bulkSuccess = false;
+      try {
+        const liquidateRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/positions?cancel_orders=true`, {
+          method: "DELETE",
+          headers: alpacaHeaders,
+        });
+        const liquidateData = await liquidateRes.json();
+        console.log(`  Bulk liquidation response: ${liquidateRes.status}`, JSON.stringify(liquidateData).substring(0, 500));
+        bulkSuccess = liquidateRes.status >= 200 && liquidateRes.status < 300;
+      } catch (e) {
+        console.error("  Bulk liquidation failed:", (e as Error).message);
+      }
+
+      // Step 4: Fallback — individually sell any remaining positions
+      if (!bulkSuccess) {
+        console.log("  ⚠️ Bulk liquidation failed — selling positions individually");
+        for (const pos of positions) {
+          const sym = pos.symbol as string;
+          const qty = parseInt(String(pos.qty));
+          if (qty <= 0) continue;
+          try {
+            await cancelOrdersForSymbol(sym);
+            const order = await placeOrder(sym, qty, "sell");
+            console.log(`  Sold ${qty} ${sym}: ${order?.id ?? "no order id"}`);
+          } catch (e) {
+            console.error(`  Failed to sell ${sym}:`, (e as Error).message);
+          }
+        }
+      }
+
+      // Step 5: Log all liquidations to Supabase
+      for (const pos of positions) {
+        const sym = pos.symbol as string;
+        const qty = parseInt(String(pos.qty));
+        const entryPrice = parseFloat(String(pos.avg_entry_price ?? 0));
+        const currentPrice = parseFloat(String(pos.current_price ?? 0));
+        await logTrade({
+          symbol: sym, action: "SELL", quantity: qty,
+          reason: `🔴 EOD NUCLEAR LIQUIDATION — day trading, no overnight holds`,
+          price_entry: entryPrice,
+          price_exit: currentPrice,
+          alpaca_order_id: "eod-nuclear-liquidate", status: "closed",
+        });
+      }
+
+      await supabase.rpc("release_bot_run");
+      return new Response(JSON.stringify({
+        status: "eod_liquidate_done",
+        positions_closed: positions.length,
+        symbols: positions.map(p => p.symbol),
+      }), { status: 200 });
+    }
+
     const marketOpen = await isClock();
     if (!marketOpen) {
       console.log("Market closed — skipping.");
