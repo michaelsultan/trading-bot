@@ -3195,6 +3195,48 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     }
   }
 
+  // Auto-blacklist: skip symbols with 3+ consecutive losses in 7 days
+  const repeatLoserSymbols = new Set<string>();
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: recentLossTrades } = await supabase
+      .from("trades").select("symbol, price_entry, price_exit, created_at")
+      .in("action", ["SELL", "PROFIT_TAKE"])
+      .gte("created_at", sevenDaysAgo)
+      .not("price_entry", "is", null).not("price_exit", "is", null)
+      .order("created_at", { ascending: false });
+    const symbolTrades: Record<string, boolean[]> = {};
+    for (const t of (recentLossTrades ?? []) as Record<string, unknown>[]) {
+      const sym = t.symbol as string;
+      if (!symbolTrades[sym]) symbolTrades[sym] = [];
+      symbolTrades[sym].push((t.price_exit as number) < (t.price_entry as number));
+    }
+    for (const [sym, results] of Object.entries(symbolTrades)) {
+      if (results.slice(0, 3).length >= 3 && results.slice(0, 3).every(r => r)) repeatLoserSymbols.add(sym);
+    }
+    if (repeatLoserSymbols.size > 0) console.log(`🚫 REPEAT LOSERS (3+ consecutive losses): ${[...repeatLoserSymbols].join(", ")}`);
+  } catch (err) { console.warn("Repeat loser check failed:", err); }
+
+  // Churn limiter: stop re-trading symbols with 5+ trades today & near-zero P&L
+  const churnedSymbols = new Set<string>();
+  try {
+    const todayStart = new Date().toISOString().split("T")[0] + "T00:00:00Z";
+    const { data: todayTrades } = await supabase
+      .from("trades").select("symbol, action, price_entry, price_exit")
+      .in("action", ["SELL", "PROFIT_TAKE"]).gte("created_at", todayStart).not("symbol", "is", null);
+    const symbolStats: Record<string, { count: number; pnl: number }> = {};
+    for (const t of (todayTrades ?? []) as Record<string, unknown>[]) {
+      const sym = t.symbol as string;
+      if (!symbolStats[sym]) symbolStats[sym] = { count: 0, pnl: 0 };
+      symbolStats[sym].count++;
+      if (t.price_entry && t.price_exit) symbolStats[sym].pnl += (t.price_exit as number) - (t.price_entry as number);
+    }
+    for (const [sym, stats] of Object.entries(symbolStats)) {
+      if (stats.count >= 5 && Math.abs(stats.pnl) < 50) churnedSymbols.add(sym);
+    }
+    if (churnedSymbols.size > 0) console.log(`🔄 CHURN LIMIT: ${[...churnedSymbols].join(", ")} (5+ trades, ~$0 P&L)`);
+  } catch (err) { console.warn("Churn limiter failed:", err); }
+
   // ── Quick snapshot test: try fetching just 3 symbols to diagnose ──
   let _snapTestResult = "not_run";
   try {
@@ -3413,12 +3455,19 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   // ── SPY TREND FILTER: Only buy when broad market is trending up ─────────────
   // If SPY is below its 20-day SMA, the market is in a downtrend — reduce exposure.
   // We still allow SELLs and existing position management, just block new BUYs.
-  let spyTrendBullish = true; // default to bullish if we can't check
+  let spyTrendBullish = true;
+  let marketRegime: "NORMAL" | "CAUTIOUS" | "DEFENSIVE" = "NORMAL";
+  let regimeSizeMultiplier = 1.0;
   try {
     const spyData = marketData["SPY"];
     if (spyData?.tech.sma20 && spyData?.tech.price) {
       spyTrendBullish = spyData.tech.price > spyData.tech.sma20;
+      const spyChangePct = spyData.tech.change_pct ?? 0;
+      if (spyChangePct <= -2.0) { marketRegime = "DEFENSIVE"; regimeSizeMultiplier = 0.25; }
+      else if (spyChangePct <= -1.0) { marketRegime = "CAUTIOUS"; regimeSizeMultiplier = 0.5; }
+      const regimeEmoji = marketRegime === "DEFENSIVE" ? "🔴" : marketRegime === "CAUTIOUS" ? "🟡" : "🟢";
       console.log(`📈 SPY trend: ${spyTrendBullish ? "BULLISH" : "⚠️ BEARISH"} (price=$${spyData.tech.price.toFixed(2)} vs SMA20=$${spyData.tech.sma20.toFixed(2)})`);
+      console.log(`${regimeEmoji} MARKET REGIME: ${marketRegime} (SPY ${spyChangePct >= 0 ? "+" : ""}${spyChangePct.toFixed(2)}%) — position size multiplier: ${regimeSizeMultiplier}x`);
     }
   } catch { /* SPY check is optional */ }
 
@@ -3451,6 +3500,21 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     let alpacaOrder = null;
     let priceEntry: number | null = null;
 
+    // Auto-blacklist: skip repeat losers
+    if (decision.action === "BUY" && repeatLoserSymbols.has(decision.symbol)) {
+      debugLog.push(`${decision.symbol}: BLOCKED - repeat loser (3+ consecutive losses)`);
+      console.warn(`🚫 REPEAT LOSER: ${decision.symbol} blocked`);
+      await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: decision.quantity,
+        reason: `Repeat loser: 3+ consecutive losses in 7 days`, status: "error" });
+      continue;
+    }
+    // Churn limiter
+    if (decision.action === "BUY" && churnedSymbols.has(decision.symbol)) {
+      debugLog.push(`${decision.symbol}: BLOCKED - churn limit (5+ trades, ~$0 P&L today)`);
+      console.warn(`🔄 CHURN: ${decision.symbol} blocked`);
+      continue;
+    }
+
     // Block decisions on symbols outside our universe
     if (decision.action !== "HOLD" && isValidSymbol(decision.symbol) && !allowedSymbols.has(decision.symbol)) {
       debugLog.push(`${decision.symbol}: BLOCKED — not in scanned/held universe (${allowedSymbols.size} allowed)`);
@@ -3458,10 +3522,10 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       continue;
     }
 
-    // Block ALL buys near market close (would be flattened immediately — pure day-trading)
-    if (decision.action === "BUY" &&
-        (etHour > FLATTEN_HOUR || (etHour === FLATTEN_HOUR && etMin >= FLATTEN_MINUTE))) {
-      debugLog.push(`${decision.symbol}: BLOCKED — too close to market close (EOD flatten at ${FLATTEN_HOUR}:${FLATTEN_MINUTE} ET)`);
+    // Block ALL buys after 3:00 PM ET - gives positions time to hit targets before flatten
+    const LAST_BUY_HOUR = 15; const LAST_BUY_MINUTE = 0;
+    if (decision.action === "BUY" && (etHour > LAST_BUY_HOUR || (etHour === LAST_BUY_HOUR && etMin >= LAST_BUY_MINUTE))) {
+      debugLog.push(`${decision.symbol}: BLOCKED - past 3:00 PM ET buy cutoff`);
       continue;
     }
 
@@ -3572,6 +3636,15 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       const sizing = atrPositionSize(currentEquity, effectivePrice, symbolATR);
       let finalQty = Math.min(decision.quantity, sizing.qty);
 
+      // Market regime: reduce position size on bad days
+      if (regimeSizeMultiplier < 1.0) {
+        const regimeAdjusted = Math.max(1, Math.floor(finalQty * regimeSizeMultiplier));
+        if (regimeAdjusted < finalQty) {
+          console.log(`🟡 REGIME SIZING: ${decision.symbol} qty ${finalQty} -> ${regimeAdjusted} (${marketRegime} mode, ${regimeSizeMultiplier}x)`);
+          finalQty = regimeAdjusted;
+        }
+      }
+
       // Cash buffer guard — always keep 10% cash
       const availableCash = parseFloat(account.cash);
       const cashAfterBuy = availableCash - (finalQty * effectivePrice);
@@ -3612,6 +3685,24 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
         console.warn("BUY blocked sector: " + sectorCheck.reason);
         await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: finalQty, reason: sectorCheck.reason, status: "error" });
         continue;
+      }
+
+      // Sector momentum gate - skip buys when sector ETF is red
+      if (!LEVERAGED_BEAR_ETFS.has(decision.symbol) && !VOLATILITY_ETFS.has(decision.symbol)) {
+        const symSector = guessSector(decision.symbol);
+        const sectorEtf = SECTOR_ETFS[symSector] ?? "SPY";
+        const sectorChg = marketData[sectorEtf]?.tech.change_pct ?? null;
+        if (sectorChg !== null && sectorChg < -0.3) {
+          const symScore = quantScores.find(s => s.symbol === decision.symbol)?.score ?? 0;
+          if (symScore < 40) {
+            debugLog.push(`${decision.symbol}: BLOCKED - sector red (${symSector}/${sectorEtf} ${sectorChg.toFixed(2)}%, score ${symScore} < 40)`);
+            console.warn(`📉 SECTOR GATE: ${decision.symbol} blocked - ${symSector} down ${sectorChg.toFixed(2)}%`);
+            await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: finalQty,
+              reason: `Sector gate: ${symSector} (${sectorEtf}) down ${sectorChg.toFixed(2)}%, score ${symScore} too low`, status: "error" });
+            continue;
+          }
+          debugLog.push(`${decision.symbol}: SECTOR OVERRIDE - ${symSector} red but score ${symScore} >= 40`);
+        }
       }
 
       console.log(`Position sizing: Grok=${decision.quantity}, ATR-optimal=${sizing.qty}, final=${finalQty} | stopDist=$${sizing.stopDistance.toFixed(2)} (${(sizing.stopLossPct * 100).toFixed(1)}%)`);
