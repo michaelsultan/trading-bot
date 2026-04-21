@@ -1,4 +1,24 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import {
+  checkEarningsCalendar as _checkEarningsCalendar,
+  fetchOrderFillPrice as _fetchOrderFillPrice,
+  computeRealizedPnl as _computeRealizedPnl,
+} from "./_p0_helpers.ts";
+import {
+  classifyRegime as _classifyRegime,
+  applyEtfBias as _applyEtfBias,
+  BlockMemo as _BlockMemo,
+  isStickyBlockReason as _isStickyBlockReason,
+} from "./_p1_helpers.ts";
+import {
+  buildReconcileReason as _buildReconcileReason,
+  cancelAllOpenOrders as _cancelAllOpenOrders,
+  findUnreconciledFills as _findUnreconciledFills,
+  type AlpacaOrderLike,
+} from "./_p2_helpers.ts";
+import {
+  fallingKnifeBlocked as _fallingKnifeBlocked,
+} from "./_p3_helpers.ts";
 
 const ALPACA_BASE_URL = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA_URL = "https://data.alpaca.markets/v2";
@@ -12,7 +32,7 @@ const DEFAULT_STOP_LOSS_PCT = 0.02; // 2% stop — Config C: cut losers fast
 const RISK_PER_TRADE_PCT = 0.025; // risk 2.5% of equity per trade
 const ATR_STOP_MULTIPLIER = 1.5;  // tighter stop = entry - (1.5 × ATR) for quicker cuts
 const MIN_CASH_PCT = 0.10;        // always keep 10% cash buffer
-const DAILY_PROFIT_TARGET = 500;  // $500/day target
+const DAILY_PROFIT_TARGET = 500;  // $500/day display target (NOT a hard cap — see Apr 21 note below)
 
 // ── TRADING MODE (set dynamically based on market phase) ─────────────────────
 type TradingMode = "SCALP" | "MOMENTUM" | "HOLD_ONLY";
@@ -167,7 +187,11 @@ async function placeOrder(symbol: string, qty: number, side: "buy" | "sell") {
 }
 
 // Buy with automatic stop-loss via Alpaca OTO (One-Triggers-Other) bracket order.
-// Uses a fixed stop_price (required by Alpaca OTO), then optionally replaces with trailing stop.
+// Uses a fixed stop_price (required by Alpaca OTO). If OTO fails, we attempt a
+// two-step fallback: market buy + standalone stop order. If the stop submission
+// fails after the buy fills, we IMMEDIATELY liquidate via opposite market sell
+// rather than run an unprotected position. This fixes the DDOG 04/17 bug where
+// a silent no-stop fallback let a position run past its intended stop loss.
 async function placeOrderWithStopLoss(
   symbol: string,
   qty: number,
@@ -184,8 +208,9 @@ async function placeOrderWithStopLoss(
     return { code: 0, message: `Invalid entry price $${entryPrice}` };
   }
 
-  // Clamp stop between 2% and 15%
-  const clampedPct = Math.max(0.02, Math.min(0.15, stopLossPct));
+  // Clamp stop between 1.5% and 15% (1.5% matches bot's tight momentum default;
+  // Alpaca OTO will reject stops that are too tight — caught below).
+  const clampedPct = Math.max(0.015, Math.min(0.15, stopLossPct));
   const stopPrice = +(entryPrice * (1 - clampedPct)).toFixed(2);
 
   console.log(`Placing BUY ${qty} ${symbol} @ ~$${entryPrice} with stop-loss at $${stopPrice} (${(clampedPct * 100).toFixed(1)}%)`);
@@ -209,28 +234,100 @@ async function placeOrderWithStopLoss(
 
   const data = await res.json();
 
-  // If OTO fails for any reason, fall back to a simple market buy (no stop attached)
-  if (data?.code || data?.message?.includes?.("error")) {
-    console.warn(`OTO order failed for ${symbol}: ${JSON.stringify(data).slice(0, 200)} — falling back to simple market buy`);
-    const fallbackRes = await withRetry(() => fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
-      method: "POST",
-      headers: alpacaHeaders,
-      body: JSON.stringify({
-        symbol,
-        qty: String(qty),
-        side: "buy",
-        type: "market",
-        time_in_force: "day",
-      }),
-    }));
-    const fallbackData = await fallbackRes.json();
-    if (fallbackData?.id) {
-      console.log(`✅ Fallback market buy succeeded for ${symbol} (no stop-loss attached — profit-taking will manage exits)`);
-    }
-    return fallbackData;
+  // Success path: OTO accepted. Return immediately.
+  if (data?.id && !data?.code) {
+    return data;
   }
 
-  return data;
+  // OTO failed. Attempt two-step fallback with MANDATORY stop attachment.
+  // Step A: submit simple market buy
+  console.warn(`OTO order failed for ${symbol}: ${JSON.stringify(data).slice(0, 200)} — trying two-step market buy + standalone stop`);
+  const buyRes = await withRetry(() => fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
+    method: "POST",
+    headers: alpacaHeaders,
+    body: JSON.stringify({
+      symbol,
+      qty: String(qty),
+      side: "buy",
+      type: "market",
+      time_in_force: "day",
+    }),
+  }));
+  const buyData = await buyRes.json();
+
+  if (!buyData?.id) {
+    console.error(`❌ Market buy fallback also failed for ${symbol}: ${JSON.stringify(buyData).slice(0, 200)}`);
+    return buyData;
+  }
+
+  // Step B: poll briefly for fill, then attach standalone stop order
+  let filled = false;
+  let fillPrice: number | null = null;
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const statusRes = await fetchWithTimeout(
+        `${ALPACA_BASE_URL}/orders/${buyData.id}`,
+        { headers: alpacaHeaders },
+        3000,
+      );
+      const statusData = await statusRes.json();
+      if (statusData?.status === "filled") {
+        filled = true;
+        fillPrice = parseFloat(String(statusData.filled_avg_price ?? entryPrice));
+        break;
+      }
+    } catch { /* keep polling */ }
+  }
+
+  const basisPrice = fillPrice ?? entryPrice;
+  const postFillStop = +(basisPrice * (1 - clampedPct)).toFixed(2);
+
+  const stopRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
+    method: "POST",
+    headers: alpacaHeaders,
+    body: JSON.stringify({
+      symbol,
+      qty: String(qty),
+      side: "sell",
+      type: "stop",
+      time_in_force: "gtc",
+      stop_price: String(postFillStop),
+    }),
+  }, 8000);
+  const stopData = await stopRes.json();
+
+  if (stopData?.id) {
+    console.log(`✅ Two-step buy+stop succeeded for ${symbol}: buy ${buyData.id}, stop ${stopData.id} @ $${postFillStop}${filled ? " (from fill " + fillPrice + ")" : " (from entry estimate)"}`);
+    return buyData;
+  }
+
+  // Standalone stop also failed — liquidate immediately rather than run unprotected
+  console.error(`❌ UNPROTECTED POSITION: stop order failed for ${symbol} after market buy filled. Liquidating via opposite market sell. stop err=${JSON.stringify(stopData).slice(0, 200)}`);
+  const liquidateRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/orders`, {
+    method: "POST",
+    headers: alpacaHeaders,
+    body: JSON.stringify({
+      symbol,
+      qty: String(qty),
+      side: "sell",
+      type: "market",
+      time_in_force: "day",
+    }),
+  }, 8000);
+  const liquidateData = await liquidateRes.json();
+  console.error(`Liquidation order for ${symbol}: ${liquidateData?.id ? "submitted " + liquidateData.id : "FAILED " + JSON.stringify(liquidateData).slice(0, 200)}`);
+  // Return an error shape so the caller does NOT log this as a successful BUY
+  return { code: 0, message: `stop attachment failed — position liquidated`, failed_buy_id: buyData.id };
+}
+
+// Poll Alpaca for the actual filled average price of an order. Returns null if
+// the order is not filled within the timeout, in which case callers should fall
+// back to a quoted price. Used by PROFIT_TAKE and EOD SELL telemetry paths.
+// Implementation lives in _p0_helpers.ts so it is reachable by Deno regression
+// tests without loading the full bot module (which connects to Supabase).
+function fetchOrderFillPrice(orderId: string, maxWaitMs = 3000): Promise<number | null> {
+  return _fetchOrderFillPrice(orderId, ALPACA_BASE_URL, alpacaHeaders, fetchWithTimeout, maxWaitMs);
 }
 
 // ── Helpers Alpaca — Market Data ─────────────────────────────────────────────
@@ -1108,24 +1205,34 @@ async function getFearGreedIndex(): Promise<FearGreedData> {
   }
 }
 
-// ── VIX Volatility Index (via Alpaca) ────────────────────────────────────────
+// ── Vol proxy (VXX via Alpaca) ────────────────────────────────────────────────
+// NOTE: `value` is the VXX share price, NOT the CBOE VIX index. Alpaca does
+// not expose the real VIX; we use VXX as a proxy. The regime classifier in
+// _p1_helpers.ts is calibrated against the VXX scale, not the VIX scale.
 interface VixData {
-  value: number;
-  label: string;  // "Low Vol" | "Normal" | "Elevated" | "High Vol" | "Extreme"
+  value: number;          // VXX share price (calm range ~25-35, stress 50+)
+  changePct: number;      // VXX intraday % change vs prior daily close
+  label: string;          // "Low Vol" | "Normal" | "Elevated" | "High Vol" | "Extreme"
 }
 
 async function getVixLevel(): Promise<VixData> {
   try {
-    // VIX is available as a snapshot from Alpaca
     const res = await fetchWithTimeout(`${ALPACA_DATA_URL}/stocks/snapshots?symbols=VXX,UVXY`, {
       headers: alpacaHeaders,
     });
     const data = await res.json();
-    // Use VXX as VIX proxy (tracks VIX short-term futures)
-    const vxx = data?.VXX?.latestTrade?.p ?? data?.UVXY?.latestTrade?.p ?? null;
-    if (!vxx) return { value: 20, label: "Normal" };
+    const snap = data?.VXX ?? data?.UVXY ?? null;
+    const vxx = snap?.latestTrade?.p ?? null;
+    if (!vxx) return { value: 20, label: "Normal", changePct: 0 };
 
-    // Map VXX price to approximate VIX interpretation
+    const prevClose = snap?.prevDailyBar?.c ?? snap?.dailyBar?.o ?? null;
+    const changePct = (typeof prevClose === "number" && prevClose > 0)
+      ? ((vxx - prevClose) / prevClose) * 100
+      : 0;
+
+    // Label uses the original calm-market VXX interpretation; the regime
+    // classifier in _p1_helpers.ts uses its own VXX-calibrated thresholds
+    // (currently >40 absolute or >15% intraday spike).
     let label = "Normal";
     if (vxx < 15) label = "Low Vol";
     else if (vxx < 25) label = "Normal";
@@ -1133,9 +1240,13 @@ async function getVixLevel(): Promise<VixData> {
     else if (vxx < 50) label = "High Vol";
     else label = "Extreme";
 
-    return { value: Math.round(vxx * 10) / 10, label };
+    return {
+      value: Math.round(vxx * 10) / 10,
+      changePct: Math.round(changePct * 10) / 10,
+      label,
+    };
   } catch {
-    return { value: 20, label: "Normal" };
+    return { value: 20, label: "Normal", changePct: 0 };
   }
 }
 
@@ -1367,29 +1478,124 @@ async function logTrade(trade: Record<string, unknown>) {
   await supabase.from("trades").insert(trade);
 }
 
+// Mark the matching open BUY rows for a symbol as closed. Does NOT write pnl
+// here — the exit row (PROFIT_TAKE / SELL) is the single source of truth for
+// realized pnl, computed from the actual Alpaca fill price. Writing pnl in
+// both places caused the 04/13–04/17 telemetry gap (~$4.5k of phantom profit
+// when reporting views summed across both row types).
 async function closeBuyTrade(symbol: string, priceExit: number) {
   const { data } = await supabase
     .from("trades")
-    .select("id, price_entry, quantity")
+    .select("id")
     .eq("symbol", symbol)
     .eq("action", "BUY")
     .eq("status", "open");
 
   if (!data?.length) return;
 
-  await Promise.all(data.map((trade) => {
-    const pnl = trade.price_entry
-      ? +((priceExit - trade.price_entry) * trade.quantity).toFixed(2)
-      : null;
-    return supabase
+  await Promise.all(data.map((trade) =>
+    supabase
       .from("trades")
-      .update({ price_exit: priceExit, pnl, status: "closed" })
-      .eq("id", trade.id);
-  }));
+      .update({ price_exit: priceExit, status: "closed" })
+      .eq("id", trade.id)
+  ));
 }
 
 async function logSnapshot(cash: number, equity: number, positions: unknown[]) {
   await supabase.from("portfolio_snapshots").insert({ cash, equity, positions });
+}
+
+// ── P2 #8: reconcile external fills into trades table ──────────────────────
+// After every cycle (and especially after EOD flatten), pull today's filled
+// SELL orders from Alpaca and insert a synthetic SELL row for any whose
+// alpaca_order_id is not yet in public.trades. This catches:
+//   • bracket-stop fills that the bot never orchestrated directly
+//   • nuclear-liquidation cron fills if the nuclear path itself fails to log
+//   • manual closes from the Alpaca dashboard
+//
+// Apr 20 RKLB scenario: the protective stop fired, Alpaca closed the position,
+// our EOD flatten loop saw qty=0 / 404 and silently skipped logging. Without
+// reconciliation, the dashboard shows zero RKLB activity after the buy even
+// though the account lost $189.
+async function reconcileAlpacaFills(): Promise<number> {
+  const todayIsoDate = new Date().toISOString().split("T")[0];
+  const afterTs = `${todayIsoDate}T00:00:00Z`;
+
+  // Step 1: pull today's filled orders from Alpaca.
+  let alpacaOrders: AlpacaOrderLike[] = [];
+  try {
+    const res = await fetchWithTimeout(
+      `${ALPACA_BASE_URL}/orders?status=closed&after=${encodeURIComponent(afterTs)}&limit=500`,
+      { headers: alpacaHeaders },
+      8000,
+    );
+    const body = await res.json();
+    if (Array.isArray(body)) alpacaOrders = body as AlpacaOrderLike[];
+  } catch (err) {
+    console.warn("reconcileAlpacaFills: failed to fetch Alpaca orders:", (err as Error).message);
+    return 0;
+  }
+
+  if (alpacaOrders.length === 0) return 0;
+
+  // Step 2: pull today's SELL-side trade rows so we can dedup by order id.
+  // We only need the order id, symbol, and action — this is a cheap query.
+  const { data: knownRows, error: selErr } = await supabase
+    .from("trades")
+    .select("alpaca_order_id, symbol, action")
+    .in("action", ["SELL", "PROFIT_TAKE"])
+    .gte("created_at", afterTs);
+  if (selErr) {
+    console.warn("reconcileAlpacaFills: failed to load known trade rows:", selErr.message);
+    return 0;
+  }
+
+  const missing = _findUnreconciledFills(alpacaOrders, (knownRows ?? []) as Array<Record<string, unknown>>);
+  if (missing.length === 0) return 0;
+
+  console.log(`🔁 RECONCILE: ${missing.length} Alpaca fill(s) missing from trades table — backfilling`);
+
+  // Step 3: for each missing fill, look up the matching open BUY row so we
+  // can compute realized pnl against the correct entry price. If no open BUY
+  // exists (e.g. the position was already partially closed), we still insert
+  // the SELL row but leave pnl null — that's strictly better than silently
+  // missing the close.
+  let inserted = 0;
+  for (const m of missing) {
+    let entryPrice: number | null = null;
+    try {
+      const { data: buyRows } = await supabase
+        .from("trades")
+        .select("price_entry")
+        .eq("symbol", m.symbol)
+        .eq("action", "BUY")
+        .eq("status", "open")
+        .limit(1);
+      if (buyRows?.[0]?.price_entry != null) {
+        entryPrice = parseFloat(String(buyRows[0].price_entry));
+      }
+    } catch { /* entryPrice stays null */ }
+
+    const realizedPnl = (entryPrice && entryPrice > 0)
+      ? _computeRealizedPnl(entryPrice, m.fillPrice, m.qty)
+      : null;
+
+    await logTrade({
+      symbol: m.symbol,
+      action: "SELL",
+      quantity: m.qty,
+      price_entry: entryPrice,
+      price_exit: m.fillPrice,
+      pnl: realizedPnl,
+      reason: _buildReconcileReason(m.filledAt),
+      alpaca_order_id: m.alpacaOrderId,
+      status: "closed",
+    });
+    await closeBuyTrade(m.symbol, m.fillPrice);
+    inserted++;
+  }
+  console.log(`🔁 RECONCILE: inserted ${inserted} synthetic SELL row(s)`);
+  return inserted;
 }
 
 async function getLastAnalyses(): Promise<string | null> {
@@ -1998,6 +2204,15 @@ const LEVERAGED_BEAR_ETFS = new Set([
 const VOLATILITY_ETFS = new Set(["UVXY", "SVXY", "VXX", "VIXY", "SVOL", "UVIX"]);
 const ALL_LEVERAGED_ETFS = new Set([...LEVERAGED_BULL_ETFS, ...LEVERAGED_BEAR_ETFS, ...VOLATILITY_ETFS]);
 
+// P1 #5 — broad/sector ETFs that earn a +5 score bonus on choppy days. These
+// are the ones we WANT to lean on when single names are unreliable. Leveraged
+// and volatility ETFs are intentionally excluded (they amplify the chop).
+const BROAD_ETF_SYMBOLS = new Set<string>([
+  "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "IVV", "VTV", "VUG", "EFA", "EEM",
+  "XLF", "XLK", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC",
+  "XBI", "IBB", "ARKK", "ARKG", "SOXX", "SMH", "GDX", "SLV", "GLD", "IAU", "USO",
+]);
+
 // Correlation guard limits — prevent concentrated directional bets
 const MAX_LEVERAGED_BULL_POSITIONS = 2;
 const MAX_LEVERAGED_BEAR_POSITIONS = 1;
@@ -2067,6 +2282,11 @@ type SnapshotData = {
   change_pct: number;
   volume: number;
   prev_close: number;
+  // Last 1 minute bar from Alpaca's snapshot. Used by the P3 falling knife
+  // filter — see _p3_helpers.ts. May be undefined when Alpaca hasn't printed
+  // a fresh minute bar yet (premarket, low volume names, etc.).
+  minute_open?: number;
+  minute_close?: number;
 };
 
 async function fetchSnapshots(symbols: string[]): Promise<SnapshotData[]> {
@@ -2096,16 +2316,26 @@ async function fetchSnapshots(symbols: string[]): Promise<SnapshotData[]> {
         const s = snap as Record<string, Record<string, number>>;
         const dailyBar = s.dailyBar;
         const prevDailyBar = s.prevDailyBar;
+        const minuteBar = s.minuteBar;
         if (dailyBar && prevDailyBar) {
           const price = dailyBar.c;
           const prevClose = prevDailyBar.c;
           const changePct = prevClose > 0 ? +((price - prevClose) / prevClose * 100).toFixed(2) : 0;
+          // Capture the most recent 1 minute bar for the P3 falling knife
+          // filter. Alpaca returns minuteBar with o/h/l/c/v/t. May be absent
+          // for thin names or premarket cycles — treat that as "no data".
+          const minuteOpen = typeof minuteBar?.o === "number" && Number.isFinite(minuteBar.o)
+            ? minuteBar.o : undefined;
+          const minuteClose = typeof minuteBar?.c === "number" && Number.isFinite(minuteBar.c)
+            ? minuteBar.c : undefined;
           results.push({
             symbol: sym,
             price,
             change_pct: changePct,
             volume: dailyBar.v ?? 0,
             prev_close: prevClose,
+            minute_open: minuteOpen,
+            minute_close: minuteClose,
           });
         }
       }
@@ -2439,9 +2669,12 @@ function quantPick(
   cooldownSymbols: Set<string>,
   equity: number,
   maxPicks = 8,
+  regimeOpts: { choppyDay?: boolean; minScoreOverride?: number; etfBiasSet?: Set<string> } = {},
 ): { decisions: Array<{ action: string; symbol: string; quantity: number; reason: string }>; scores: QuantScore[] } {
   const snapshotMap = new Map(snapshots.map(s => [s.symbol, s]));
   const socialMap = new Map(socialData.map(s => [s.symbol, s]));
+  const choppyDay = !!regimeOpts.choppyDay;
+  const etfBiasSet = regimeOpts.etfBiasSet ?? new Set<string>();
 
   // Score every stock with market data
   const allScores: QuantScore[] = [];
@@ -2460,14 +2693,26 @@ function quantPick(
       optionsFlow[sym] ?? 0,
       equity,
     );
+    // P1 #5: on choppy days, tilt score in favor of liquid diversified ETFs
+    // and against single names. No effect when choppyDay is false.
+    if (choppyDay) {
+      const rawScore = scored.score;
+      const adjusted = _applyEtfBias(rawScore, scored.symbol, true, etfBiasSet);
+      if (adjusted !== rawScore) {
+        const delta = adjusted - rawScore;
+        scored.score = adjusted;
+        scored.reason = `${scored.reason} | regime bias ${delta >= 0 ? "+" : ""}${delta}`;
+      }
+    }
     allScores.push(scored);
   }
 
   // Sort by score descending — top scores get bought
   allScores.sort((a, b) => b.score - a.score);
 
-  // Minimum score threshold: backtest-proven optimal — more trades = more edge
-  const MIN_SCORE = 28;  // Config C: very low bar — take more trades for higher volume
+  // P1 #4: on choppy days the caller passes a higher minScoreOverride (50) so
+  // we only take our best conviction ideas. Normal days use the Config C floor.
+  const MIN_SCORE = regimeOpts.minScoreOverride ?? 28;
   const topPicks = allScores.filter(s => s.score >= MIN_SCORE).slice(0, maxPicks);
 
   console.log(`🧮 QUANT SCORES (top 10): ${allScores.slice(0, 10).map(s => `${s.symbol}=${s.score}`).join(", ")}`);
@@ -2844,7 +3089,7 @@ ${now.toISOString()} — Cycle #${cycleCount} — Il te reste ~${cyclesLeft} cyc
 Phase du marché: ${marketPhase}
 Mode de trading: ${tradingModeLabel}
 🎯 Objectif du jour: +$${DAILY_PROFIT_TARGET} (=${(DAILY_PROFIT_TARGET / currentEquity * 100).toFixed(2)}% du portfolio)
-📊 P&L du jour: $${todayPnl.toFixed(2)} / $${DAILY_PROFIT_TARGET} (${(todayPnl / DAILY_PROFIT_TARGET * 100).toFixed(0)}%)${hitDailyTarget ? " ✅ TARGET HIT — PROTECT MODE" : ""}
+📊 P&L du jour: $${todayPnl.toFixed(2)} / $${DAILY_PROFIT_TARGET} (${(todayPnl / DAILY_PROFIT_TARGET * 100).toFixed(0)}%)${hitDailyTarget ? " ✅ Objectif atteint (continue à trader)" : ""}
 
 ## Portfolio actuel
 - Cash disponible : $${account.cash}
@@ -3127,6 +3372,17 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   const etHour = new Date(_now.toLocaleString("en-US", { timeZone: "America/New_York" })).getHours();
   const etMin = new Date(_now.toLocaleString("en-US", { timeZone: "America/New_York" })).getMinutes();
 
+  // ── P2 #8: pre-cycle reconciliation safety net ──────────────────────────────
+  // Catch any external SELL fills (bracket stops, manual closes, prior-cycle
+  // EOD refusals) that happened since our last cycle, BEFORE we read positions.
+  // This way getPositions() reflects the true post-stop state and downstream
+  // sizing / churn / sector logic see accurate held-symbol data.
+  try {
+    await reconcileAlpacaFills();
+  } catch (err) {
+    console.warn("Pre-cycle reconciliation failed (non-fatal):", (err as Error).message);
+  }
+
   const [account, positions] = await Promise.all([getAccount(), getPositions()]);
   const currentEquity = parseFloat(account.equity);
 
@@ -3138,11 +3394,14 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   }
 
   // ── DAILY P&L TRACKER ──────────────────────────────────────────────────────
-  // Track today's realized P&L. Once we hit $500+, switch to conservative mode.
+  // Apr 21: target is a telemetry number only. The old "PROTECT MODE" gate
+  // that blocked new buys at +$500 has been removed so the bot can keep
+  // compounding on strong days. Drawdown circuit breaker upstream still
+  // caps downside.
   const todayPnl = parseFloat(String(account.equity)) - parseFloat(String(account.last_equity ?? account.equity));
   const hitDailyTarget = todayPnl >= DAILY_PROFIT_TARGET;
   if (hitDailyTarget) {
-    console.log(`🎯🎯🎯 DAILY TARGET HIT! Today's P&L: +$${todayPnl.toFixed(2)} — switching to PROTECT MODE (no new buys, only sells to lock profits)`);
+    console.log(`🎯 Daily target hit: +$${todayPnl.toFixed(2)} — continuing to trade (no PROTECT MODE cap).`);
   } else {
     const pnlEmoji = todayPnl >= 0 ? "📈" : "📉";
     console.log(`${pnlEmoji} Today's P&L: $${todayPnl.toFixed(2)} / $${DAILY_PROFIT_TARGET} target (${(todayPnl / DAILY_PROFIT_TARGET * 100).toFixed(0)}%)`);
@@ -3169,6 +3428,34 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     getCycleCount(),
     getOptionsFlow(symbols),
   ]);
+
+  // ── P1 #4: morning regime classifier ──────────────────────────────────────
+  // Fires on SPY gap >1% (|change_pct| used as gap proxy since we only get
+  // intraday change_pct here), OR the VXX proxy being elevated (>40) OR
+  // spiking intraday (>15% from prior close). On choppy days the quant
+  // engine takes half the picks and applies a QS floor of 35 plus the
+  // P1 #5 ETF bias. Rationale: Apr 14 fired 23 entries on a gap down and
+  // bled; ideal behavior would have been ~10 entries at higher conviction.
+  //
+  // Apr 20 calibration: previous version used `vixValue > 25` which tripped
+  // every day because VXX's calm-market share price is already ~25-35.
+  // Thresholds are now VXX calibrated (absolute >40 and intraday >15%).
+  const _spyChangeForRegime = marketData["SPY"]?.tech.change_pct ?? 0;
+  const _vxxForRegime = enrichment?.vix?.value ?? null;
+  const _vxxChangeForRegime = enrichment?.vix?.changePct ?? null;
+  const _regime = _classifyRegime(
+    {
+      spyChangePct: _spyChangeForRegime,
+      spyGapPct: _spyChangeForRegime,
+      vixProxyValue: _vxxForRegime,
+      vixProxyChangePct: _vxxChangeForRegime,
+    },
+    6,
+    28,
+  );
+  if (_regime.choppyDay) {
+    console.log(`⚠️ CHOPPY REGIME: ${_regime.reasons.join(" | ")} — cutting picks to ${_regime.maxPicks}, min QS=${_regime.minScore}`);
+  }
 
   // ── QUANT-FIRST DECISION ENGINE ────────────────────────────────────────────
   // Step 1: Quant scorer picks top 6 stocks by pure math (no LLM)
@@ -3276,7 +3563,12 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     heldSymbolSet,
     cooldownSymbols,
     currentEquity,
-    6, // pick top 6
+    _regime.maxPicks,  // 3 on choppy days, 6 on normal days
+    {
+      choppyDay: _regime.choppyDay,
+      minScoreOverride: _regime.minScore,  // 50 on choppy days, 28 on normal
+      etfBiasSet: BROAD_ETF_SYMBOLS,
+    },
   );
 
   // Use Grok ONLY for sell decisions on existing positions (risk management)
@@ -3317,14 +3609,39 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   const FLATTEN_HOUR = 15; const FLATTEN_MINUTE = 45; // 3:45 PM ET — earlier cutoff, nuclear liquidation handles the rest
   const EARNINGS_HOLD_MIN_PROFIT_PCT = 0.005; // must be at least +0.5% to hold through earnings
   if (etHour > FLATTEN_HOUR || (etHour === FLATTEN_HOUR && etMin >= FLATTEN_MINUTE)) {
+    // ── P2 #7: cancel-then-refetch ─────────────────────────────────────────
+    // Apr 20 RKLB scenario: protective bracket stop pledged 147 shares, the
+    // sell loop saw qty=0 / 404 and silently skipped logging. Cancelling all
+    // open orders globally, then re-pulling positions, eliminates the race
+    // between the bracket stop firing and our flatten attempt.
+    const cancelResult = await _cancelAllOpenOrders(ALPACA_BASE_URL, alpacaHeaders, fetchWithTimeout);
+    console.log(`🌙 EOD pre-flatten: cancelled ${cancelResult.cancelled} open order(s)${cancelResult.ok ? "" : ` (warning: ${cancelResult.reason})`}`);
+    await new Promise((r) => setTimeout(r, 1500)); // give Alpaca time to release pledged shares
+
+    // Refetch positions with accurate qty after cancellation. If this fetch
+    // fails we fall back to the cycle's earlier snapshot rather than skip
+    // flatten entirely — the worst case is we use slightly stale qty and the
+    // reconciliation pass at the end of the cycle still cleans up.
+    let flattenPositions: Record<string, unknown>[] = positions as Record<string, unknown>[];
+    try {
+      const posRes = await fetchWithTimeout(`${ALPACA_BASE_URL}/positions`, { headers: alpacaHeaders }, 8000);
+      const fresh = await posRes.json();
+      if (Array.isArray(fresh)) flattenPositions = fresh as Record<string, unknown>[];
+    } catch (err) {
+      console.warn("🌙 EOD pre-flatten: position refetch failed — using cycle snapshot:", (err as Error).message);
+    }
+
     // Check which held symbols have AMC earnings today
-    const heldSymbols = (positions as Record<string, unknown>[]).map(p => p.symbol as string);
+    const heldSymbols = flattenPositions.map(p => p.symbol as string);
     const earningsExempt = await getEarningsExemptSymbols(heldSymbols);
 
-    for (const pos of (positions as Record<string, unknown>[])) {
+    for (const pos of flattenPositions) {
       const sym = pos.symbol as string;
       const qty = parseInt(String(pos.qty));
-      if (qty <= 0) continue;
+      if (qty <= 0) {
+        console.log(`🌙 EOD FLATTEN: skipping ${sym} — qty=${qty} (already closed)`);
+        continue;
+      }
       const isLev = ALL_LEVERAGED_ETFS.has(sym);
       const entryPrice = parseFloat(String(pos.avg_entry_price));
       const currentPrice = parseFloat(String(pos.current_price ?? 0));
@@ -3344,20 +3661,53 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       }
 
       console.log(`🌙 EOD FLATTEN: Closing ${sym} (${qty} shares)${isLev ? " [leveraged]" : ""} — no overnight holds`);
+      // cancelOrdersForSymbol is now redundant after the global cancel above,
+      // but kept as a belt-and-suspenders guard for any orders that re-armed.
       await cancelOrdersForSymbol(sym);
       const order = await placeOrder(sym, qty, "sell");
       soldSymbols.add(sym);
       if (order?.id) {
+        // Use the actual Alpaca fill price for realized pnl. Falls back to the
+        // position quote only if the fill can't be fetched in time.
+        const fillPrice = await fetchOrderFillPrice(order.id) ?? currentPrice;
+        const realizedPnl = entryPrice > 0
+          ? +((fillPrice - entryPrice) * qty).toFixed(2)
+          : null;
         await logTrade({
           symbol: sym, action: "SELL", quantity: qty,
           reason: `EOD flatten: pure day-trading — close all positions before 4 PM ET${isLev ? " (leveraged)" : ""}`,
           price_entry: entryPrice,
-          price_exit: currentPrice,
+          price_exit: fillPrice,
+          pnl: realizedPnl,
           alpaca_order_id: order.id, status: "closed",
         });
-        await closeBuyTrade(sym, currentPrice);
-        await closeBuyTrade(sym, currentPrice);
+        await closeBuyTrade(sym, fillPrice);
+      } else {
+        // placeOrder refused (typically the safety check in placeOrder saw
+        // qty=0 / 404 because the bracket already fired). Don't silently drop
+        // it — log a diagnostic row so the audit trail captures the attempt.
+        // The reconciliation pass below will pick up the real fill from
+        // Alpaca's order history and insert the proper SELL row.
+        const refusal = (order as { message?: string } | null)?.message ?? "unknown reason";
+        console.warn(`🌙 EOD FLATTEN: ${sym} sell refused (${refusal}) — reconciliation will backfill from Alpaca order history`);
+        await logTrade({
+          symbol: sym, action: "BUY_BLOCKED", quantity: qty,
+          reason: `EOD flatten skipped: ${refusal} — awaiting Alpaca reconciliation`,
+          alpaca_order_id: "eod-flatten-refused", status: "error",
+        });
       }
+    }
+
+    // ── P2 #8: reconcile any stop fills the bot did not orchestrate ─────────
+    // After the flatten loop, ask Alpaca for ALL of today's filled orders and
+    // insert a synthetic SELL row for any whose order id is not yet in our
+    // trades table. This is the safety net that catches bracket-stop fills,
+    // partial liquidations, and anything else that closed a position outside
+    // the bot's direct control.
+    try {
+      await reconcileAlpacaFills();
+    } catch (err) {
+      console.warn("EOD reconciliation failed (will retry next cycle):", (err as Error).message);
     }
   }
 
@@ -3423,18 +3773,26 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       const order = await placeOrder(sym, sellQty, "sell");
       if (order?.id) {
         profitTakeOrders.push(order);
+        const ptEntry = parseFloat(String(pos.avg_entry_price));
+        const quotePrice = parseFloat(String(pos.current_price ?? 0));
+        // Wait briefly for the actual fill; fall back to the live quote if Alpaca
+        // hasn't reported the fill yet. This keeps PROFIT_TAKE pnl honest.
+        const fillPrice = await fetchOrderFillPrice(order.id) ?? quotePrice;
+        const realizedPnl = ptEntry > 0
+          ? +((fillPrice - ptEntry) * sellQty).toFixed(2)
+          : null;
         await logTrade({
           symbol: sym,
           action: "PROFIT_TAKE",
           quantity: sellQty,
           reason,
-          price_entry: parseFloat(String(pos.avg_entry_price)),
-          price_exit: parseFloat(String(pos.current_price ?? 0)),
+          price_entry: ptEntry,
+          price_exit: fillPrice,
+          pnl: realizedPnl,
           alpaca_order_id: order.id,
           status: "closed",
         });
-        if (reason.includes("ALL")) await closeBuyTrade(sym, parseFloat(String(pos.current_price ?? 0)));
-        if (reason.includes("ALL")) await closeBuyTrade(sym, parseFloat(String(pos.current_price ?? 0)));
+        if (reason.includes("ALL")) await closeBuyTrade(sym, fillPrice);
       } else {
         console.error(`Profit-take order failed for ${sym}:`, order);
       }
@@ -3458,11 +3816,12 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
   let spyTrendBullish = true;
   let marketRegime: "NORMAL" | "CAUTIOUS" | "DEFENSIVE" = "NORMAL";
   let regimeSizeMultiplier = 1.0;
+  let spyChangePct = 0;
   try {
     const spyData = marketData["SPY"];
     if (spyData?.tech.sma20 && spyData?.tech.price) {
       spyTrendBullish = spyData.tech.price > spyData.tech.sma20;
-      const spyChangePct = spyData.tech.change_pct ?? 0;
+      spyChangePct = spyData.tech.change_pct ?? 0;
       if (spyChangePct <= -2.0) { marketRegime = "DEFENSIVE"; regimeSizeMultiplier = 0.25; }
       else if (spyChangePct <= -1.0) { marketRegime = "CAUTIOUS"; regimeSizeMultiplier = 0.5; }
       const regimeEmoji = marketRegime === "DEFENSIVE" ? "🔴" : marketRegime === "CAUTIOUS" ? "🟡" : "🟢";
@@ -3471,32 +3830,71 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     }
   } catch { /* SPY check is optional */ }
 
+
   // ── EARNINGS BLACKOUT: Fetch today's earnings calendar, block new BUYs ─────
   // Don't buy stocks reporting earnings today — price action is unpredictable,
   // spreads widen, and moves are already priced in from social/news buzz.
-  let earningsBlackoutSymbols = new Set<string>();
-  try {
-    const finnhubKey = Deno.env.get("FINNHUB_API_KEY");
-    if (finnhubKey) {
-      const today = new Date().toISOString().split("T")[0];
-      const earningsRes = await fetchWithTimeout(
-        `${FINNHUB_BASE_URL}/calendar/earnings?from=${today}&to=${today}&token=${finnhubKey}`,
-        undefined, 8000
-      );
-      const earningsData = await earningsRes.json();
-      for (const e of (earningsData?.earningsCalendar ?? [])) {
-        earningsBlackoutSymbols.add(e.symbol);
-      }
-      console.log(`📅 Earnings blackout: ${earningsBlackoutSymbols.size} stocks reporting today${earningsBlackoutSymbols.size > 0 ? " — " + [...earningsBlackoutSymbols].slice(0, 15).join(", ") + (earningsBlackoutSymbols.size > 15 ? "..." : "") : ""}`);
-    }
-  } catch (err) {
-    console.warn("Earnings blackout calendar fetch failed:", err);
+  //
+  // FAIL CLOSED: if Finnhub fetch fails, times out, or returns an empty list
+  // when we had reason to expect entries (missing API key is treated as a hard
+  // fail), we block ALL new BUYs for this cycle. This fixes the ABT 04/17 bug
+  // where a silent fetch failure let a blocked ticker through on one cycle.
+  const today = new Date().toISOString().split("T")[0];
+  const finnhubKey = Deno.env.get("FINNHUB_API_KEY");
+  const earningsResult = await _checkEarningsCalendar(finnhubKey, FINNHUB_BASE_URL, today, fetchWithTimeout);
+  const earningsBlackoutSymbols = earningsResult.symbols;
+  const earningsFetchOk = earningsResult.ok;
+  const earningsFailReason = earningsResult.reason;
+  if (earningsFetchOk) {
+    console.log(`📅 Earnings blackout: ${earningsBlackoutSymbols.size} stocks reporting today${earningsBlackoutSymbols.size > 0 ? " — " + [...earningsBlackoutSymbols].slice(0, 15).join(", ") + (earningsBlackoutSymbols.size > 15 ? "..." : "") : ""}`);
+  } else {
+    console.error(`❌ EARNINGS FETCH FAILED: ${earningsFailReason} — blocking ALL new BUYs this cycle`);
   }
 
   // Cooldown already handled by quant engine — no duplicate check needed
   const executedOrders = [...profitTakeOrders];
   const debugLog: string[] = [];  // Track why each decision succeeded or was blocked
+
+  // ── P3 #1: snapshot lookup for the falling knife filter ───────────────────
+  // The filter needs the most recent 1 minute open/close per symbol. We
+  // already fetched the full universe snapshot during discovery — index it
+  // by symbol once so the BUY loop can do a constant time lookup instead of
+  // a linear scan per decision.
+  const _snapshotMap = new Map<string, SnapshotData>();
+  for (const snap of cachedSnapshots) {
+    _snapshotMap.set(snap.symbol, snap);
+  }
+
+  // ── P1 #6: hydrate BUY_BLOCKED memo from today's trades ────────────────────
+  // Skip re-running expensive checks on symbols we already blocked today for a
+  // persistent reason (repeat loser, churn, crash, correlation, sector, earnings).
+  // Transient reasons (fail-closed, lunch lull, 3pm cutoff) are intentionally
+  // excluded so they can recover within the day.
+  const _blockMemo = new _BlockMemo();
+  try {
+    const { data: todaysBlocks } = await supabase
+      .from("trades")
+      .select("symbol, reason")
+      .eq("action", "BUY_BLOCKED")
+      .gte("created_at", `${today}T00:00:00Z`)
+      .not("symbol", "is", null);
+    if (todaysBlocks && todaysBlocks.length > 0) {
+      const added = _blockMemo.hydrate(todaysBlocks as Array<{ symbol: string; reason: string }>, today);
+      if (added > 0) {
+        console.log(`🧠 BLOCK MEMO: hydrated ${added} sticky blocks from today's trades (${todaysBlocks.length} BUY_BLOCKED rows scanned)`);
+      }
+    }
+  } catch (err) {
+    console.warn(`Block memo hydration failed (non-critical): ${String(err).slice(0, 120)}`);
+  }
+
   for (const decision of decisions) {
+    // P1 #6: short-circuit if this symbol was already blocked today for a
+    // sticky reason. No re-logging, no API calls.
+    if (decision.action === "BUY" && _blockMemo.has(decision.symbol, today)) {
+      debugLog.push(`${decision.symbol}: SKIP (memoized block: ${_blockMemo.get(decision.symbol, today)})`);
+      continue;
+    }
     let alpacaOrder = null;
     let priceEntry: number | null = null;
 
@@ -3504,14 +3902,20 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     if (decision.action === "BUY" && repeatLoserSymbols.has(decision.symbol)) {
       debugLog.push(`${decision.symbol}: BLOCKED - repeat loser (3+ consecutive losses)`);
       console.warn(`🚫 REPEAT LOSER: ${decision.symbol} blocked`);
+      const _repeatReason = `Repeat loser: 3+ consecutive losses in 7 days`;
       await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: decision.quantity,
-        reason: `Repeat loser: 3+ consecutive losses in 7 days`, status: "error" });
+        reason: _repeatReason, status: "error" });
+      _blockMemo.remember(decision.symbol, today, _repeatReason);
       continue;
     }
     // Churn limiter
     if (decision.action === "BUY" && churnedSymbols.has(decision.symbol)) {
       debugLog.push(`${decision.symbol}: BLOCKED - churn limit (5+ trades, ~$0 P&L today)`);
       console.warn(`🔄 CHURN: ${decision.symbol} blocked`);
+      const _churnReason = `Churn limit: 5+ trades with ~$0 P&L today`;
+      await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: decision.quantity,
+        reason: _churnReason, status: "error" });
+      _blockMemo.remember(decision.symbol, today, _churnReason);
       continue;
     }
 
@@ -3544,16 +3948,31 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     }
 
     // Earnings blackout — don't buy stocks reporting earnings today
-    if (decision.action === "BUY" && earningsBlackoutSymbols.has(decision.symbol)) {
-      debugLog.push(`${decision.symbol}: BLOCKED — earnings blackout (reporting today)`);
-      console.warn(`📅 EARNINGS BLACKOUT: ${decision.symbol} blocked — stock has earnings today, too unpredictable`);
+    // Fail closed: if the calendar fetch failed, block ALL new BUYs this cycle.
+    if (decision.action === "BUY" && !earningsFetchOk) {
+      debugLog.push(`${decision.symbol}: BLOCKED — earnings calendar unavailable (${earningsFailReason})`);
+      console.warn(`📅 EARNINGS FAIL-CLOSED: ${decision.symbol} blocked — cannot verify earnings today (${earningsFailReason})`);
       await logTrade({
         symbol: decision.symbol,
         action: "BUY_BLOCKED",
         quantity: decision.quantity,
-        reason: `Earnings blackout: ${decision.symbol} reports earnings today — price action unpredictable, spreads wide`,
+        reason: `Earnings fail-closed: calendar unavailable (${earningsFailReason}) — blocking until calendar can be verified`,
         status: "error",
       });
+      continue;
+    }
+    if (decision.action === "BUY" && earningsBlackoutSymbols.has(decision.symbol)) {
+      debugLog.push(`${decision.symbol}: BLOCKED — earnings blackout (reporting today)`);
+      console.warn(`📅 EARNINGS BLACKOUT: ${decision.symbol} blocked — stock has earnings today, too unpredictable`);
+      const _earnReason = `Earnings blackout: ${decision.symbol} reports earnings today — price action unpredictable, spreads wide`;
+      await logTrade({
+        symbol: decision.symbol,
+        action: "BUY_BLOCKED",
+        quantity: decision.quantity,
+        reason: _earnReason,
+        status: "error",
+      });
+      _blockMemo.remember(decision.symbol, today, _earnReason);
       continue;
     }
 
@@ -3576,13 +3995,15 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       if (!guard.allowed) {
         console.warn(`🛡️ CORRELATION GUARD: ${decision.symbol} blocked — ${guard.reason}`);
         debugLog.push(`${decision.symbol}: BLOCKED — CORRELATION GUARD (${guard.reason})`);
+        const _corrReason = `Correlation guard: ${guard.reason}`;
         await logTrade({
           symbol: decision.symbol,
           action: "BUY_BLOCKED",
           quantity: decision.quantity,
-          reason: `Correlation guard: ${guard.reason}`,
+          reason: _corrReason,
           status: "error",
         });
+        _blockMemo.remember(decision.symbol, today, _corrReason);
         continue;
       }
     }
@@ -3594,23 +4015,53 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       if (symData && symData.tech.change_pct < -10) {
         debugLog.push(`${decision.symbol}: BLOCKED — CRASH FILTER (down ${symData.tech.change_pct}% today, likely bad news)`);
         console.warn(`🚨 CRASH FILTER: ${decision.symbol} down ${symData.tech.change_pct}% — blocking buy (falling knife)`);
+        const _crashReason = `Crash filter: ${decision.symbol} down ${symData.tech.change_pct}% today — falling knife blocked`;
         await logTrade({
           symbol: decision.symbol,
           action: "BUY_BLOCKED",
           quantity: decision.quantity,
-          reason: `Crash filter: ${decision.symbol} down ${symData.tech.change_pct}% today — falling knife blocked`,
+          reason: _crashReason,
           status: "error",
         });
+        _blockMemo.remember(decision.symbol, today, _crashReason);
+        continue;
+      }
+
+      // 🔪 P3 #1 FALLING KNIFE FILTER — require a green confirmation bar on
+      // low conviction oversold setups. Apr 20 RKLB was scored 38 with RSI 30
+      // and bought twice while the last 1m bar was red. Both fills lost ~90 bps
+      // immediately. This filter would have blocked both entries.
+      // Intentionally NOT sticky — see _p3_helpers.ts header for rationale.
+      const _qkScore = quantScores.find((s) => s.symbol === decision.symbol)?.score ?? null;
+      const _qkRsi = symData?.tech.rsi14 ?? null;
+      const _qkSnap = _snapshotMap.get(decision.symbol);
+      const _knifeCheck = _fallingKnifeBlocked({
+        score: _qkScore,
+        rsi14: _qkRsi,
+        minuteOpen: _qkSnap?.minute_open ?? null,
+        minuteClose: _qkSnap?.minute_close ?? null,
+      });
+      if (_knifeCheck.blocked) {
+        debugLog.push(`${decision.symbol}: BLOCKED — ${_knifeCheck.reason}`);
+        console.warn(`🔪 FALLING KNIFE: ${decision.symbol} — ${_knifeCheck.reason}`);
+        await logTrade({
+          symbol: decision.symbol,
+          action: "BUY_BLOCKED",
+          quantity: decision.quantity,
+          reason: _knifeCheck.reason!,
+          status: "error",
+        });
+        // Note: deliberately NOT remembering in _blockMemo — the next minute
+        // bar could go green and we want to reconsider then.
         continue;
       }
 
       // Cooldown + crash filter already handled by quant engine upstream
 
-      // Block new buys when daily target is hit — protect profits
-      if (hitDailyTarget) {
-        debugLog.push(`${decision.symbol}: BLOCKED — daily target hit`);
-        continue;
-      }
+      // NOTE (Apr 21): daily profit target is now a display number only, not a
+      // hard cap. The old PROTECT MODE gate blocked every new buy once daily
+      // P&L crossed +$500, which left winning days on the table. Drawdown
+      // circuit breaker upstream still limits downside.
 
       const alreadyOpen = (positions as Record<string, string>[]).some(p => p.symbol === decision.symbol);
       const alreadyBoughtThisCycle = executedOrders.some(o => o.symbol === decision.symbol && o.side === "buy");
@@ -3668,13 +4119,18 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       if (orderValue > maxAllowed) {
         debugLog.push(`${decision.symbol}: BLOCKED — 18% cap (order=$${orderValue.toFixed(0)}, max=$${maxAllowed.toFixed(0)})`);
         console.warn(`BUY blocked — $${orderValue.toFixed(0)} exceeds 18% cap ($${maxAllowed.toFixed(0)}) for ${decision.symbol}`);
+        const _capReason = `Order value $${orderValue.toFixed(0)} exceeds 25% position cap`;
         await logTrade({
           symbol: decision.symbol,
           action: "BUY_BLOCKED",
           quantity: finalQty,
-          reason: `Order value $${orderValue.toFixed(0)} exceeds 25% position cap`,
+          reason: _capReason,
           status: "error",
         });
+        // Memoize so subsequent cycles skip the sizing/cap recompute for this
+        // symbol today. Equity and price both move intraday but rarely by
+        // enough to flip a rejection, and the memo clears at EOD either way.
+        _blockMemo.remember(decision.symbol, today, _capReason);
         continue;
       }
 
@@ -3683,7 +4139,9 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       if (!sectorCheck.allowed) {
         debugLog.push(decision.symbol + ": BLOCKED sector: " + sectorCheck.reason);
         console.warn("BUY blocked sector: " + sectorCheck.reason);
-        await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: finalQty, reason: sectorCheck.reason, status: "error" });
+        const _sectorReason = `Sector exposure: ${sectorCheck.reason}`;
+        await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: finalQty, reason: _sectorReason, status: "error" });
+        _blockMemo.remember(decision.symbol, today, _sectorReason);
         continue;
       }
 
@@ -3740,7 +4198,7 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
 
       // Cancel any open orders (stop-loss, etc.) that hold shares before selling
       await cancelOrdersForSymbol(decision.symbol);
-      const priceExit = await getLatestPrice(decision.symbol) || marketData[decision.symbol]?.tech.price;
+      const quotedPrice = await getLatestPrice(decision.symbol) || marketData[decision.symbol]?.tech.price;
       alpacaOrder = await placeOrder(decision.symbol, sellQty, "sell");
       if (alpacaOrder?.code || alpacaOrder?.message) {
         console.error("Alpaca SELL rejected:", alpacaOrder);
@@ -3753,9 +4211,22 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
         });
         continue;
       }
-      if (priceExit) await closeBuyTrade(decision.symbol, priceExit);
-      priceEntry = priceExit;
+      // Poll for the actual Alpaca fill. Fall back to the live quote if the fill
+      // is not yet reported. The SELL row (written below at the generic logTrade
+      // call) carries the realized pnl — closeBuyTrade only marks status closed.
+      const sellFillPrice = alpacaOrder?.id
+        ? (await fetchOrderFillPrice(alpacaOrder.id) ?? quotedPrice)
+        : quotedPrice;
+      const sellEntryPrice = heldPosition ? parseFloat(String(heldPosition.avg_entry_price ?? 0)) : 0;
+      const sellRealizedPnl = sellEntryPrice > 0 && sellFillPrice
+        ? +((sellFillPrice - sellEntryPrice) * sellQty).toFixed(2)
+        : null;
+      if (sellFillPrice) await closeBuyTrade(decision.symbol, sellFillPrice);
+      priceEntry = sellFillPrice;
       decision.quantity = sellQty;
+      // Stash realized pnl on the decision so the generic logTrade below can pick it up
+      (decision as Record<string, unknown>).__realized_pnl = sellRealizedPnl;
+      (decision as Record<string, unknown>).__price_exit = sellFillPrice;
 
     } else if (decision.action === "SHORT" && isValidSymbol(decision.symbol) && isValidQuantity(decision.quantity)) {
       // SHORT SELLING — profit from price drops in bearish/overextended stocks
@@ -3807,7 +4278,8 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
         tradeReason += ` | [QS:${qs.score} M:${qs.momentum} V:${qs.volumeScore} R:${qs.rsiSignal} MACD:${qs.macdSignal} P:${qs.patternScore} S:${qs.socialBuzz} O:${qs.optionsFlow} ATR:${atrVal ?? "N/A"}${isLev ? " LEV" : ""}]`;
       }
     }
-    await logTrade({
+    const decMeta = decision as Record<string, unknown>;
+    const tradeRow: Record<string, unknown> = {
       symbol: decision.symbol ?? null,
       action: decision.action,
       quantity: decision.quantity ?? null,
@@ -3815,7 +4287,14 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
       price_entry: priceEntry,
       alpaca_order_id: alpacaOrder?.id ?? null,
       status: decision.action === "SELL" ? "closed" : "open",
-    });
+    };
+    if (decision.action === "SELL") {
+      // Propagate fill price + realized pnl captured above so the SELL row is
+      // the single source of truth for realized pnl (see closeBuyTrade notes).
+      if (decMeta.__price_exit != null) tradeRow.price_exit = decMeta.__price_exit;
+      if (decMeta.__realized_pnl != null) tradeRow.pnl = decMeta.__realized_pnl;
+    }
+    await logTrade(tradeRow);
 
     if (alpacaOrder) {
       debugLog.push(`${decision.symbol}: ✅ ORDER EXECUTED (id=${alpacaOrder.id})`);
@@ -3936,6 +4415,8 @@ Deno.serve(async (req) => {
       }
 
       // Step 4: Fallback — individually sell any remaining positions
+      // Track per-symbol order ids so we can pull actual fill prices for telemetry
+      const liquidateOrderIds = new Map<string, string>();
       if (!bulkSuccess) {
         console.log("  ⚠️ Bulk liquidation failed — selling positions individually");
         for (const pos of positions) {
@@ -3945,6 +4426,7 @@ Deno.serve(async (req) => {
           try {
             await cancelOrdersForSymbol(sym);
             const order = await placeOrder(sym, qty, "sell");
+            if (order?.id) liquidateOrderIds.set(sym, order.id);
             console.log(`  Sold ${qty} ${sym}: ${order?.id ?? "no order id"}`);
           } catch (e) {
             console.error(`  Failed to sell ${sym}:`, (e as Error).message);
@@ -3952,19 +4434,40 @@ Deno.serve(async (req) => {
         }
       }
 
-      // Step 5: Log all liquidations to Supabase
+      // Step 5: Log all liquidations to Supabase. Use actual Alpaca fill prices
+      // so realized pnl reconciles with the account equity delta. Falls back to
+      // the position quote only if no fill is reported in time.
       for (const pos of positions) {
         const sym = pos.symbol as string;
         const qty = parseInt(String(pos.qty));
         const entryPrice = parseFloat(String(pos.avg_entry_price ?? 0));
-        const currentPrice = parseFloat(String(pos.current_price ?? 0));
+        const quotePrice = parseFloat(String(pos.current_price ?? 0));
+        const orderId = liquidateOrderIds.get(sym);
+        const fillPrice = orderId
+          ? (await fetchOrderFillPrice(orderId) ?? quotePrice)
+          : quotePrice;
+        const realizedPnl = entryPrice > 0
+          ? +((fillPrice - entryPrice) * qty).toFixed(2)
+          : null;
         await logTrade({
           symbol: sym, action: "SELL", quantity: qty,
           reason: `🔴 EOD NUCLEAR LIQUIDATION — day trading, no overnight holds`,
           price_entry: entryPrice,
-          price_exit: currentPrice,
-          alpaca_order_id: "eod-nuclear-liquidate", status: "closed",
+          price_exit: fillPrice,
+          pnl: realizedPnl,
+          alpaca_order_id: orderId ?? "eod-nuclear-liquidate", status: "closed",
         });
+        await closeBuyTrade(sym, fillPrice);
+      }
+
+      // Step 6: Safety net — reconcile any nuclear fills whose individual logTrade
+      // above may have failed (network blip, supabase 5xx) by cross checking Alpaca's
+      // order history against today's trades rows. Same dedup key as the EOD flatten
+      // path so no double writes.
+      try {
+        await reconcileAlpacaFills();
+      } catch (e) {
+        console.error("  Nuclear reconciliation failed:", (e as Error).message);
       }
 
       await supabase.rpc("release_bot_run");
