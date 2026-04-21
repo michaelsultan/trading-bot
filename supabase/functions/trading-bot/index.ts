@@ -19,6 +19,12 @@ import {
 import {
   fallingKnifeBlocked as _fallingKnifeBlocked,
 } from "./_p3_helpers.ts";
+import {
+  buildRecentExitMap as _buildRecentExitMap,
+  reentryBlocked as _reentryBlocked,
+  applySentimentGuard as _applySentimentGuard,
+  type RecentExitInfo as _RecentExitInfo,
+} from "./_p4_helpers.ts";
 
 const ALPACA_BASE_URL = "https://paper-api.alpaca.markets/v2";
 const ALPACA_DATA_URL = "https://data.alpaca.markets/v2";
@@ -2573,6 +2579,15 @@ function quantScore(
       socialBuzz = 3; // high buzz but not bullish
     }
   }
+  // P4 #3: sentiment gate when RSI is oversold. Apr 21 ASTS regression —
+  // score 55.55 cleared the 45 floor thanks to a +10 Reddit boost on RSI
+  // 33.7. A buzz spike on an already oversold name is more often a short
+  // squeeze trap than a real tailwind, so zero the buzz below the P3 floor.
+  const _socialBuzzRaw = socialBuzz;
+  socialBuzz = _applySentimentGuard(socialBuzz, tech.rsi14);
+  if (_socialBuzzRaw > 0 && socialBuzz === 0) {
+    reasons.push(`🛑 sentiment gated: RSI ${tech.rsi14?.toFixed(1) ?? "?"} < 35, ignoring +${_socialBuzzRaw} buzz`);
+  }
   score += socialBuzz;
 
   // 7. OPTIONS FLOW (0-10 pts)
@@ -3888,6 +3903,31 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
     console.warn(`Block memo hydration failed (non-critical): ${String(err).slice(0, 120)}`);
   }
 
+  // ── P4 #1: recent exit map for the reentry guard ──────────────────────────
+  // Pull today's SELL and PROFIT_TAKE rows so the BUY loop can block a rebuy
+  // on any symbol we just closed within the reentry window (default 30 min).
+  // Fails OPEN on query errors — we don't want a DB hiccup to freeze buys.
+  const _recentExitMap = new Map<string, _RecentExitInfo>();
+  try {
+    const { data: todaysExits } = await supabase
+      .from("trades")
+      .select("symbol, action, created_at, pnl")
+      .in("action", ["SELL", "PROFIT_TAKE"])
+      .gte("created_at", `${today}T00:00:00Z`)
+      .not("symbol", "is", null);
+    if (todaysExits && todaysExits.length > 0) {
+      const built = _buildRecentExitMap(todaysExits as Array<{
+        symbol: string | null; action: string | null; created_at: string | null; pnl?: number | null;
+      }>);
+      for (const [k, v] of built) _recentExitMap.set(k, v);
+      if (_recentExitMap.size > 0) {
+        console.log(`🧠 REENTRY MAP: ${_recentExitMap.size} symbol(s) in 30m reentry window (${todaysExits.length} exits scanned today)`);
+      }
+    }
+  } catch (err) {
+    console.warn(`Recent exit hydration failed (non-critical): ${String(err).slice(0, 120)}`);
+  }
+
   for (const decision of decisions) {
     // P1 #6: short-circuit if this symbol was already blocked today for a
     // sticky reason. No re-logging, no API calls.
@@ -3917,6 +3957,23 @@ async function runFullCycle(scanTriggers: ScanTrigger[] = []): Promise<Response>
         reason: _churnReason, status: "error" });
       _blockMemo.remember(decision.symbol, today, _churnReason);
       continue;
+    }
+
+    // ── P4 #1: reentry guard ─────────────────────────────────────────────
+    // Block a rebuy within 30 minutes of the last SELL or PROFIT_TAKE on the
+    // same symbol. Apr 21 pattern: bot scalped BULL for +$19, rebought 18
+    // minutes later on a +6.9% gap and lost $272. Same with FCEL and LCID.
+    // Intentionally NOT added to the sticky block memo — the 30 minute window
+    // expires and the bot can reconsider the name later in the day.
+    if (decision.action === "BUY") {
+      const _reentry = _reentryBlocked(decision.symbol, _recentExitMap);
+      if (_reentry.blocked) {
+        debugLog.push(`${decision.symbol}: BLOCKED — ${_reentry.reason}`);
+        console.warn(`🔁 REENTRY GUARD: ${_reentry.reason}`);
+        await logTrade({ symbol: decision.symbol, action: "BUY_BLOCKED", quantity: decision.quantity,
+          reason: _reentry.reason ?? "Reentry guard", status: "error" });
+        continue;
+      }
     }
 
     // Block decisions on symbols outside our universe

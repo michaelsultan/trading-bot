@@ -41,13 +41,49 @@ Deno.test("P3-knife: blocks low score + oversold + flat bar", () => {
   assertStringIncludes(res.reason!, "flat");
 });
 
-Deno.test("P3-knife: allows low score + oversold + green bar", () => {
-  // Green confirmation — this is the case we do want to trade.
+Deno.test("P3-knife: allows low score + oversold + meaningful green bar", () => {
+  // Green confirmation — 0.5% move is above the 0.3% default threshold.
   const res = fallingKnifeBlocked({
     score: 38,
     rsi14: 30,
     minuteOpen: 10.00,
     minuteClose: 10.05,
+  });
+  assertFalse(res.blocked);
+});
+
+Deno.test("P3-knife: P4 #2 blocks weak green bar (Apr 21 LCID regression)", () => {
+  // Apr 21: LCID quant score 42, RSI 32.2, 1m bar moved from 2.40 to 2.41
+  // — a +0.4% tick that should not count as a real recovery. With the
+  // 0.3% floor it should *not* block... actually 0.4% > 0.3% so it would
+  // pass. Use a 0.1% tick that is clearly below the floor.
+  const res = fallingKnifeBlocked({
+    score: 42,
+    rsi14: 32.2,
+    minuteOpen: 2.400,
+    minuteClose: 2.402,  // +0.083%
+  });
+  assert(res.blocked);
+  assertStringIncludes(res.reason!, "weak green");
+});
+
+Deno.test("P3-knife: custom greenMinPct respected", () => {
+  // If we bump the green floor to 1%, a 0.5% move is now weak green.
+  const res = fallingKnifeBlocked(
+    { score: 38, rsi14: 30, minuteOpen: 10.00, minuteClose: 10.05 },
+    { greenMinPct: 1.0 },
+  );
+  assert(res.blocked);
+  assertStringIncludes(res.reason!, "weak green");
+});
+
+Deno.test("P3-knife: fails OPEN on non positive minuteOpen", () => {
+  // Degenerate bar data — don't divide by zero, just let the name through.
+  const res = fallingKnifeBlocked({
+    score: 38,
+    rsi14: 30,
+    minuteOpen: 0,
+    minuteClose: 0,
   });
   assertFalse(res.blocked);
 });

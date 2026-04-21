@@ -28,6 +28,11 @@
 
 const DEFAULT_SCORE_FLOOR = 45;
 const DEFAULT_RSI_FLOOR = 35;
+// P4 #2: require the "green confirmation" bar to actually move up by at least
+// GREEN_MIN_PCT percent. Apr 21 LCID regression: the bot released two LCID
+// entries (score 42, RSI 32.2) because the 1m bar printed a tick above open,
+// but the move was too small to be a real recovery. Both fills lost ~1.5%.
+const DEFAULT_GREEN_MIN_PCT = 0.3;
 
 export interface FallingKnifeInputs {
   score: number | null | undefined;
@@ -37,8 +42,9 @@ export interface FallingKnifeInputs {
 }
 
 export interface FallingKnifeOptions {
-  scoreFloor?: number;  // score below which the filter is armed
-  rsiFloor?: number;    // RSI14 below which the filter is armed
+  scoreFloor?: number;   // score below which the filter is armed
+  rsiFloor?: number;     // RSI14 below which the filter is armed
+  greenMinPct?: number;  // minimum 1m green move (% of open) to count as confirmation
 }
 
 export interface FallingKnifeResult {
@@ -52,6 +58,7 @@ export function fallingKnifeBlocked(
 ): FallingKnifeResult {
   const scoreFloor = opts.scoreFloor ?? DEFAULT_SCORE_FLOOR;
   const rsiFloor = opts.rsiFloor ?? DEFAULT_RSI_FLOOR;
+  const greenMinPct = opts.greenMinPct ?? DEFAULT_GREEN_MIN_PCT;
 
   const score = finiteOrNull(inputs.score);
   const rsi = finiteOrNull(inputs.rsi14);
@@ -70,11 +77,18 @@ export function fallingKnifeBlocked(
   // premarket cycle or every symbol that Alpaca hasn't printed a fresh
   // minute bar for yet.
   if (mo == null || mc == null) return { blocked: false };
+  if (mo <= 0) return { blocked: false };
 
-  // Green bar (close strictly above open) is the confirmation we want.
-  if (mc > mo) return { blocked: false };
+  // Meaningful green bar (close above open by at least greenMinPct of open)
+  // is the confirmation we want. A tick green bar is not a real recovery.
+  const movePct = ((mc - mo) / mo) * 100;
+  if (movePct >= greenMinPct) return { blocked: false };
 
-  const direction = mc < mo ? "red" : "flat";
+  let direction: string;
+  if (mc < mo) direction = "red";
+  else if (mc === mo) direction = "flat";
+  else direction = `weak green +${movePct.toFixed(2)}% < ${greenMinPct}%`;
+
   const reason =
     `Falling knife: score ${score.toFixed(1)} < ${scoreFloor} + RSI ${rsi.toFixed(1)} < ${rsiFloor}, ` +
     `last 1m bar ${direction} (${mo.toFixed(2)} → ${mc.toFixed(2)})`;
